@@ -14,8 +14,9 @@ namespace BluetoothLockScreen
             _btManager = btManager;
             DeviceListBox.ItemsSource = _devices;
 
-            // 读取当前阈值
+            // 初始化控件值
             RssiThresholdBox.Text = ConfigManager.Default.RssiThreshold.ToString();
+            MinimizeToTrayCheckBox.IsChecked = ConfigManager.Default.MinimizeToTray;
         }
 
         private async void ScanButton_Click(object sender, RoutedEventArgs e)
@@ -46,7 +47,7 @@ namespace BluetoothLockScreen
 
         private void DeviceListBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
         {
-            // 不作处理
+            // 不处理
         }
 
         private void SaveButton_Click(object sender, RoutedEventArgs e)
@@ -57,6 +58,7 @@ namespace BluetoothLockScreen
                 return;
             }
             ConfigManager.Default.RssiThreshold = threshold;
+            ConfigManager.Default.MinimizeToTray = MinimizeToTrayCheckBox.IsChecked == true;  // 新增
 
             var selectedDevice = DeviceListBox.SelectedItem as BluetoothDeviceInfo;
             if (selectedDevice != null)
