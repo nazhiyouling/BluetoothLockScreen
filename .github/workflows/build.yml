@@ -8,8 +8,7 @@ env:
   SOLUTION_FILE: BluetoothLockScreen.sln
   BUILD_PLATFORM: x64
   DOTNET_VERSION: 8.0.x
-  BASE_EXE_NAME: 蓝牙锁屏监控                     # 基础名称
-  # 版本号将在重命名步骤中动态添加
+  BASE_EXE_NAME: 蓝牙锁屏监控                     # 基础名称，不含扩展名
 
 jobs:
   build:
@@ -64,10 +63,17 @@ jobs:
     - name: Build solution
       run: dotnet build ${{ env.SOLUTION_FILE }} -c Release /p:Platform=${{ env.BUILD_PLATFORM }} --no-restore
 
+    # 👇 发布时传入清理后的版本号，使 exe 文件属性也携带该版本
     - name: Publish (self-contained single file)
-      run: dotnet publish ${{ env.SOLUTION_FILE }} -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
+      shell: pwsh
+      run: |
+        # 去掉 Tag 中的 'v' 前缀，得到纯数字版本号（如 v1.0.0 -> 1.0.0）
+        $rawTag = "${{ github.event.release.tag_name }}"
+        $cleanVersion = $rawTag -replace '^v', ''
+        Write-Host "Clean version: $cleanVersion"
+        dotnet publish ${{ env.SOLUTION_FILE }} -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:Version=$cleanVersion -o publish
 
-    # 👇 重命名 exe，自动附加当前 Release 的版本号
+    # 👇 重命名 exe，文件名带完整 Tag（保留原始 Tag，便于识别）
     - name: Rename exe with release version
       shell: pwsh
       run: |
@@ -84,7 +90,6 @@ jobs:
             exit 1
         }
 
-    # 上传带版本号的文件
     - name: Upload to Release Assets
       uses: softprops/action-gh-release@v2
       with:
