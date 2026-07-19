@@ -1,0 +1,38 @@
+name: Build Bluetooth LockScreen
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  SOLUTION_FILE: BluetoothLockScreen.sln
+  BUILD_PLATFORM: x64
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Setup .NET 6
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: 6.0.x
+
+    - name: Restore dependencies
+      run: dotnet restore ${{ env.SOLUTION_FILE }}
+
+    - name: Build solution
+      run: dotnet build ${{ env.SOLUTION_FILE }} -c Release /p:Platform=${{ env.BUILD_PLATFORM }} --no-restore
+
+    - name: Publish (self-contained single file)
+      run: dotnet publish ${{ env.SOLUTION_FILE }} -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: BluetoothLockScreen-Release
+        path: publish/
