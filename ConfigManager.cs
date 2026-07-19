@@ -42,5 +42,6 @@ namespace BluetoothLockScreen
         public string DeviceAddress { get; set; } = "";
         public string DeviceName { get; set; } = "";
         public int RssiThreshold { get; set; } = -70;
+        public bool MinimizeToTray { get; set; } = false;   // 新增
     }
 }
