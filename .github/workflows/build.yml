@@ -63,7 +63,6 @@ jobs:
     - name: Build solution
       run: dotnet build ${{ env.SOLUTION_FILE }} -c Release /p:Platform=${{ env.BUILD_PLATFORM }} --no-restore
 
-    # 发布时传入清理后的版本号（去掉 v 或 V）
     - name: Publish (self-contained single file)
       shell: pwsh
       run: |
@@ -72,7 +71,17 @@ jobs:
         Write-Host "Clean version: $cleanVersion"
         dotnet publish ${{ env.SOLUTION_FILE }} -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:Version=$cleanVersion -o publish
 
-    # 重命名 exe，文件名保留原始 Tag
+    # 复制 Resources 文件夹到发布目录（额外保险）
+    - name: Copy Resources folder to publish output
+      shell: pwsh
+      run: |
+        if (Test-Path "Resources") {
+            Copy-Item -Path "Resources" -Destination "publish\Resources" -Recurse -Force
+            Write-Host "Resources folder copied to publish"
+        } else {
+            Write-Host "Resources folder not found, skipping copy"
+        }
+
     - name: Rename exe with release version
       shell: pwsh
       run: |
