@@ -1,5 +1,4 @@
 using System.Collections.ObjectModel;
-using System.Linq;
 using System.Windows;
 
 namespace BluetoothLockScreen
@@ -15,8 +14,8 @@ namespace BluetoothLockScreen
             _btManager = btManager;
             DeviceListBox.ItemsSource = _devices;
 
-            // 初始化当前阈值
-            RssiThresholdBox.Text = Properties.Settings.Default.RssiThreshold.ToString();
+            // 读取当前阈值
+            RssiThresholdBox.Text = ConfigManager.Default.RssiThreshold.ToString();
         }
 
         private async void ScanButton_Click(object sender, RoutedEventArgs e)
@@ -47,25 +46,23 @@ namespace BluetoothLockScreen
 
         private void DeviceListBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
         {
-            // 选中设备不做额外操作，待保存时处理
+            // 不作处理
         }
 
         private void SaveButton_Click(object sender, RoutedEventArgs e)
         {
-            // 验证并保存 RSSI 阈值
             if (!int.TryParse(RssiThresholdBox.Text, out int threshold))
             {
                 MessageBox.Show("请输入有效的整数阈值。", "输入错误", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
-            Properties.Settings.Default.RssiThreshold = threshold;
+            ConfigManager.Default.RssiThreshold = threshold;
 
-            // 保存选中的设备地址
             var selectedDevice = DeviceListBox.SelectedItem as BluetoothDeviceInfo;
             if (selectedDevice != null)
             {
-                Properties.Settings.Default.DeviceAddress = selectedDevice.Address.ToString();
-                Properties.Settings.Default.DeviceName = selectedDevice.DisplayName;
+                ConfigManager.Default.DeviceAddress = selectedDevice.Address.ToString();
+                ConfigManager.Default.DeviceName = selectedDevice.DisplayName;
             }
             else
             {
@@ -73,7 +70,7 @@ namespace BluetoothLockScreen
                 return;
             }
 
-            Properties.Settings.Default.Save();
+            ConfigManager.Save();
             _btManager.UpdateThreshold(threshold);
             DialogResult = true;
             Close();
@@ -92,11 +89,10 @@ namespace BluetoothLockScreen
         }
     }
 
-    // 用于绑定列表的蓝牙设备信息类
     public class BluetoothDeviceInfo
     {
         public ulong Address { get; set; }
-        public string DisplayName { get; set; }
+        public string DisplayName { get; set; } = "";
         public override string ToString() => DisplayName;
     }
 }
