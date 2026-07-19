@@ -12,6 +12,9 @@ env:
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write           # 必须具有写入权限才能上传 Release Asset
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -85,7 +88,16 @@ jobs:
     - name: Publish (self-contained single file)
       run: dotnet publish ${{ env.SOLUTION_FILE }} -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
 
-    - name: Upload artifacts
+    # 关键步骤：将 publish 文件夹中的所有文件上传到当前 Release 的 Assets
+    - name: Upload to Release Assets
+      uses: softprops/action-gh-release@v2
+      with:
+        files: publish/*
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    # （可选）保留一份 Artifact 作为备份
+    - name: Upload artifacts (backup)
       uses: actions/upload-artifact@v4
       with:
         name: BluetoothLockScreen-Release
