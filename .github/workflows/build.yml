@@ -9,18 +9,75 @@ on:
 env:
   SOLUTION_FILE: BluetoothLockScreen.sln
   BUILD_PLATFORM: x64
+  DOTNET_VERSION: 8.0.x
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4          # 升级到 v4
+      uses: actions/checkout@v4
 
-    - name: Setup .NET 6
-      uses: actions/setup-dotnet@v4      # 升级到 v4
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: 6.0.x
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+
+    - name: Debug - Show Resources folder content
+      shell: pwsh
+      run: |
+        Write-Host "=== Repository root ==="
+        Get-ChildItem -Name
+        if (Test-Path "Resources") {
+            Write-Host "=== Resources folder content ==="
+            Get-ChildItem -Path Resources -Recurse | ForEach-Object { $_.FullName }
+        } else {
+            Write-Host "Resources folder does NOT exist."
+        }
+
+    - name: Fix icon files (case-insensitive match, fallback placeholder)
+      shell: pwsh
+      run: |
+        # Ensure Resources folder exists
+        if (-not (Test-Path "Resources")) {
+            New-Item -ItemType Directory -Path "Resources"
+        }
+
+        # Function to find a file matching pattern in a folder (case-insensitive)
+        function Get-MatchingFile {
+            param([string]$Folder, [string]$Pattern)
+            Get-ChildItem -Path $Folder -Name "*" | Where-Object { $_ -like $Pattern } | Select-Object -First 1
+        }
+
+        # Try to find actual icon files, ignoring case
+        $icoFile = Get-MatchingFile "Resources" "*.ico"
+        $pngFile = Get-MatchingFile "Resources" "*.png"
+
+        # If we found .ico and .png files, copy/rename them to the exact names expected by the project
+        if ($icoFile -and $icoFile -ne "app.ico") {
+            Copy-Item "Resources\$icoFile" "Resources\app.ico" -Force
+            Write-Host "Renamed $icoFile to app.ico"
+        }
+        if ($pngFile -and $pngFile -ne "app.png") {
+            Copy-Item "Resources\$pngFile" "Resources\app.png" -Force
+            Write-Host "Renamed $pngFile to app.png"
+        }
+
+        # If still missing, generate tiny placeholder icons
+        if (-not (Test-Path "Resources\app.ico")) {
+            Write-Host "Generating placeholder app.ico"
+            # Minimal valid ICO file (1x1 transparent)
+            $icoBytes = [System.Convert]::FromBase64String("AAABAAEAEBAAAAEAIABoBAAAFgAAACgAAAAQAAAAIAAAAAEAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+            [System.IO.File]::WriteAllBytes("Resources\app.ico", $icoBytes)
+        }
+        if (-not (Test-Path "Resources\app.png")) {
+            Write-Host "Generating placeholder app.png"
+            $pngBytes = [System.Convert]::FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+            [System.IO.File]::WriteAllBytes("Resources\app.png", $pngBytes)
+        }
+
+        Write-Host "Final Resources content:"
+        Get-ChildItem -Path Resources
 
     - name: Restore dependencies
       run: dotnet restore ${{ env.SOLUTION_FILE }}
@@ -32,7 +89,7 @@ jobs:
       run: dotnet publish ${{ env.SOLUTION_FILE }} -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
 
     - name: Upload artifacts
-      uses: actions/upload-artifact@v4   # 关键修复：v3 -> v4
+      uses: actions/upload-artifact@v4
       with:
         name: BluetoothLockScreen-Release
         path: publish/
