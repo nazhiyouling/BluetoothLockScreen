@@ -23,7 +23,7 @@
 
         <!-- 蓝牙设备扫描区 -->
         <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,5">
-            <Button Content="扫描设备" Width="100" Click="ScanButton_Click"/>
+            <Button x:Name="ScanButton" Content="扫描设备" Width="100" Click="ScanButton_Click"/>
             <TextBlock x:Name="ScanStatus" Text="未扫描" VerticalAlignment="Center"
                        Margin="10,0,0,0" Foreground="Gray"/>
         </StackPanel>
