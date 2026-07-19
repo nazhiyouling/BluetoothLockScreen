@@ -1,0 +1,47 @@
+<Window x:Class="BluetoothLockScreen.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="设置" Height="400" Width="450"
+        WindowStartupLocation="CenterOwner"
+        Icon="Resources/app.ico"
+        ResizeMode="CanResizeWithGrip">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- RSSI阈值设置 -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+            <TextBlock Text="RSSI锁屏阈值 (dBm):" VerticalAlignment="Center" Width="140"/>
+            <TextBox x:Name="RssiThresholdBox" Width="80" VerticalAlignment="Center"/>
+            <TextBlock Text="（负值，如 -70）" VerticalAlignment="Center" Margin="5,0,0,0"/>
+        </StackPanel>
+
+        <!-- 蓝牙设备扫描区 -->
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,5">
+            <Button Content="扫描设备" Width="100" Click="ScanButton_Click"/>
+            <TextBlock x:Name="ScanStatus" Text="未扫描" VerticalAlignment="Center"
+                       Margin="10,0,0,0" Foreground="Gray"/>
+        </StackPanel>
+
+        <!-- 设备列表 -->
+        <ListBox x:Name="DeviceListBox" Grid.Row="2" DisplayMemberPath="DisplayName"
+                 SelectionChanged="DeviceListBox_SelectionChanged"
+                 Margin="0,0,0,10"/>
+
+        <!-- 记录RSSI按钮 -->
+        <Button Grid.Row="3" Content="📝 记录当前RSSI值" Height="35"
+                Margin="0,0,0,5" Click="RecordRssiButton_Click"/>
+
+        <!-- 保存与关闭 -->
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="保存设置" Width="100" Height="30" Click="SaveButton_Click"/>
+            <Button Content="取消" Width="100" Height="30" Margin="10,0,0,0"
+                    Click="CancelButton_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>
