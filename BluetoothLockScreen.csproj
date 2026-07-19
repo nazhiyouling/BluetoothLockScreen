@@ -13,8 +13,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Resource Include="Resources\app.ico" Condition="Exists('Resources\app.ico')" />
-    <Resource Include="Resources\app.png" Condition="Exists('Resources\app.png')" />
+    <Resource Include="Resources\app.ico" />
+    <Resource Include="Resources\app.png" />
   </ItemGroup>
 
 </Project>
