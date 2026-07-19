@@ -35,9 +35,9 @@ namespace BluetoothLockScreen
         {
             try
             {
-                // 从嵌入的 WPF 资源中加载 app.ico
+                // 明确使用 System.Windows.Application 避免歧义
                 var iconUri = new Uri("Resources/app.ico", UriKind.Relative);
-                StreamResourceInfo streamInfo = Application.GetResourceStream(iconUri);
+                StreamResourceInfo streamInfo = System.Windows.Application.GetResourceStream(iconUri);
 
                 Icon trayIcon;
                 if (streamInfo != null)
@@ -49,7 +49,6 @@ namespace BluetoothLockScreen
                 }
                 else
                 {
-                    // 如果资源未找到，使用系统默认图标（确保程序不崩溃）
                     trayIcon = System.Drawing.SystemIcons.Application;
                 }
 
@@ -60,38 +59,30 @@ namespace BluetoothLockScreen
                     Text = "蓝牙锁屏监控"
                 };
 
-                // 右键菜单
                 var contextMenu = new ContextMenuStrip();
                 contextMenu.Items.Add("显示窗口", null, ShowWindowFromTray);
                 contextMenu.Items.Add("退出程序", null, ExitApplication);
                 _notifyIcon.ContextMenuStrip = contextMenu;
 
-                // 双击托盘图标恢复窗口
                 _notifyIcon.MouseDoubleClick += (sender, args) => ShowWindowFromTray(null, null);
             }
             catch (Exception ex)
             {
-                // 托盘初始化完全失败，放弃托盘，但不影响主窗口
                 System.Diagnostics.Debug.WriteLine("托盘图标初始化失败: " + ex.Message);
                 _notifyIcon = null;
             }
         }
 
-        /// <summary>
-        /// 窗口关闭事件：根据设置决定隐藏到托盘或直接退出
-        /// </summary>
         private void MainWindow_Closing(object sender, System.ComponentModel.CancelEventArgs e)
         {
             if (!_forceClose && ConfigManager.Default.MinimizeToTray && _notifyIcon != null)
             {
-                // 隐藏窗口并显示托盘图标
                 e.Cancel = true;
                 Hide();
                 _notifyIcon.Visible = true;
             }
             else
             {
-                // 真正退出，清理资源
                 if (_notifyIcon != null)
                 {
                     _notifyIcon.Visible = false;
@@ -102,9 +93,6 @@ namespace BluetoothLockScreen
             }
         }
 
-        /// <summary>
-        /// 从托盘恢复窗口
-        /// </summary>
         private void ShowWindowFromTray(object sender, EventArgs e)
         {
             Show();
@@ -114,16 +102,12 @@ namespace BluetoothLockScreen
                 _notifyIcon.Visible = false;
         }
 
-        /// <summary>
-        /// 托盘菜单“退出程序”
-        /// </summary>
         private void ExitApplication(object sender, EventArgs e)
         {
             _forceClose = true;
             Close();
         }
 
-        // ---------- 原有功能（开始/停止监控、设置） ----------
         private async void StartStopButton_Click(object sender, RoutedEventArgs e)
         {
             if (!_isMonitoring)
