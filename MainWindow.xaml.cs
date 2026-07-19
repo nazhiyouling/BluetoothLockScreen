@@ -25,21 +25,39 @@ namespace BluetoothLockScreen
                 deviceName => Dispatcher.Invoke(() => DeviceNameText.Text = deviceName)
             );
 
+            // 确保窗口在加载后绝对可见
+            this.Loaded += (s, e) =>
+            {
+                this.Show();
+                this.Activate();
+                this.WindowState = WindowState.Normal;
+                this.Topmost = true;   // 临时置顶，确保用户看到
+                this.Topmost = false;  // 恢复
+            };
+
             InitializeTrayIcon();
+
+            // 启动时若检测到 MinimizeToTray 为 true，但托盘创建失败，自动关闭该选项
+            if (ConfigManager.Default.MinimizeToTray && _notifyIcon == null)
+            {
+                ConfigManager.Default.MinimizeToTray = false;
+                ConfigManager.Save();
+                System.Windows.MessageBox.Show(
+                    "托盘图标创建失败，已自动关闭“关闭时最小化到托盘”选项。\n程序将正常退出。",
+                    "提示",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
         }
 
-        /// <summary>
-        /// 初始化系统托盘图标，从嵌入资源加载图标，避免依赖外部文件
-        /// </summary>
         private void InitializeTrayIcon()
         {
             try
             {
-                // 明确使用 System.Windows.Application 避免歧义
+                Icon trayIcon = null;
                 var iconUri = new Uri("Resources/app.ico", UriKind.Relative);
                 StreamResourceInfo streamInfo = System.Windows.Application.GetResourceStream(iconUri);
 
-                Icon trayIcon;
                 if (streamInfo != null)
                 {
                     using (var stream = streamInfo.Stream)
@@ -49,7 +67,15 @@ namespace BluetoothLockScreen
                 }
                 else
                 {
-                    trayIcon = System.Drawing.SystemIcons.Application;
+                    // 资源不存在，尝试从文件系统加载
+                    if (File.Exists("Resources/app.ico"))
+                    {
+                        trayIcon = new Icon("Resources/app.ico");
+                    }
+                    else
+                    {
+                        trayIcon = System.Drawing.SystemIcons.Application;
+                    }
                 }
 
                 _notifyIcon = new NotifyIcon
@@ -68,14 +94,15 @@ namespace BluetoothLockScreen
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine("托盘图标初始化失败: " + ex.Message);
+                System.Diagnostics.Debug.WriteLine("托盘初始化失败: " + ex.Message);
                 _notifyIcon = null;
             }
         }
 
         private void MainWindow_Closing(object sender, System.ComponentModel.CancelEventArgs e)
         {
-            if (!_forceClose && ConfigManager.Default.MinimizeToTray && _notifyIcon != null)
+            // 仅当托盘可用且用户开启最小化到托盘时才隐藏窗口
+            if (!_forceClose && _notifyIcon != null && ConfigManager.Default.MinimizeToTray)
             {
                 e.Cancel = true;
                 Hide();
@@ -83,6 +110,7 @@ namespace BluetoothLockScreen
             }
             else
             {
+                // 真正退出
                 if (_notifyIcon != null)
                 {
                     _notifyIcon.Visible = false;
@@ -108,6 +136,7 @@ namespace BluetoothLockScreen
             Close();
         }
 
+        // 原有功能
         private async void StartStopButton_Click(object sender, RoutedEventArgs e)
         {
             if (!_isMonitoring)
