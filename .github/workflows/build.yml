@@ -2,18 +2,19 @@ name: Build on Release
 
 on:
   release:
-    types: [published]          # 仅在发布正式 Release 时触发
+    types: [published]
 
 env:
   SOLUTION_FILE: BluetoothLockScreen.sln
   BUILD_PLATFORM: x64
   DOTNET_VERSION: 8.0.x
+  EXE_OUTPUT_NAME: 蓝牙锁屏监控           # 自定义 exe 名称（不含扩展名）
 
 jobs:
   build:
     runs-on: windows-latest
     permissions:
-      contents: write           # 必须具有写入权限才能上传 Release Asset
+      contents: write
 
     steps:
     - name: Checkout code
@@ -39,32 +40,12 @@ jobs:
     - name: Fix icon files (case-insensitive match, fallback placeholder)
       shell: pwsh
       run: |
-        # Ensure Resources folder exists
-        if (-not (Test-Path "Resources")) {
-            New-Item -ItemType Directory -Path "Resources"
-        }
-
-        # Function to find a file matching pattern in a folder (case-insensitive)
-        function Get-MatchingFile {
-            param([string]$Folder, [string]$Pattern)
-            Get-ChildItem -Path $Folder -Name "*" | Where-Object { $_ -like $Pattern } | Select-Object -First 1
-        }
-
-        # Try to find actual icon files, ignoring case
+        if (-not (Test-Path "Resources")) { New-Item -ItemType Directory -Path "Resources" }
+        function Get-MatchingFile { param([string]$Folder, [string]$Pattern) Get-ChildItem -Path $Folder -Name "*" | Where-Object { $_ -like $Pattern } | Select-Object -First 1 }
         $icoFile = Get-MatchingFile "Resources" "*.ico"
         $pngFile = Get-MatchingFile "Resources" "*.png"
-
-        # If we found .ico and .png files, copy/rename them to the exact names expected by the project
-        if ($icoFile -and $icoFile -ne "app.ico") {
-            Copy-Item "Resources\$icoFile" "Resources\app.ico" -Force
-            Write-Host "Renamed $icoFile to app.ico"
-        }
-        if ($pngFile -and $pngFile -ne "app.png") {
-            Copy-Item "Resources\$pngFile" "Resources\app.png" -Force
-            Write-Host "Renamed $pngFile to app.png"
-        }
-
-        # If still missing, generate tiny placeholder icons
+        if ($icoFile -and $icoFile -ne "app.ico") { Copy-Item "Resources\$icoFile" "Resources\app.ico" -Force }
+        if ($pngFile -and $pngFile -ne "app.png") { Copy-Item "Resources\$pngFile" "Resources\app.png" -Force }
         if (-not (Test-Path "Resources\app.ico")) {
             Write-Host "Generating placeholder app.ico"
             $icoBytes = [System.Convert]::FromBase64String("AAABAAEAEBAAAAEAIABoBAAAFgAAACgAAAAQAAAAIAAAAAEAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
@@ -76,9 +57,6 @@ jobs:
             [System.IO.File]::WriteAllBytes("Resources\app.png", $pngBytes)
         }
 
-        Write-Host "Final Resources content:"
-        Get-ChildItem -Path Resources
-
     - name: Restore dependencies
       run: dotnet restore ${{ env.SOLUTION_FILE }}
 
@@ -88,15 +66,31 @@ jobs:
     - name: Publish (self-contained single file)
       run: dotnet publish ${{ env.SOLUTION_FILE }} -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
 
-    # 关键步骤：将 publish 文件夹中的所有文件上传到当前 Release 的 Assets
+    # 👇 关键修复步骤：重命名 exe 为指定名称
+    - name: Rename exe to custom name
+      shell: pwsh
+      run: |
+        $exeName = "$env:EXE_OUTPUT_NAME.exe"
+        # 找到 publish 目录下唯一的 exe 文件（通常只有一个）
+        $exe = Get-ChildItem -Path publish -Filter *.exe | Select-Object -First 1
+        if ($exe) {
+            $newPath = Join-Path publish $exeName
+            Write-Host "Renaming '$($exe.Name)' to '$exeName'"
+            Move-Item -Path $exe.FullName -Destination $newPath -Force
+        } else {
+            Write-Host "No exe file found in publish directory!"
+            exit 1
+        }
+
+    # 上传单个 exe 文件到 Release
     - name: Upload to Release Assets
       uses: softprops/action-gh-release@v2
       with:
-        files: publish/*
+        files: publish/${{ env.EXE_OUTPUT_NAME }}.exe
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    # （可选）保留一份 Artifact 作为备份
+    # （可选）备份 Artifact
     - name: Upload artifacts (backup)
       uses: actions/upload-artifact@v4
       with:
