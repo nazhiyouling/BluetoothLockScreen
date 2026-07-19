@@ -8,7 +8,8 @@ env:
   SOLUTION_FILE: BluetoothLockScreen.sln
   BUILD_PLATFORM: x64
   DOTNET_VERSION: 8.0.x
-  EXE_OUTPUT_NAME: 蓝牙锁屏监控           # 自定义 exe 名称（不含扩展名）
+  BASE_EXE_NAME: 蓝牙锁屏监控                     # 基础名称
+  # 版本号将在重命名步骤中动态添加
 
 jobs:
   build:
@@ -66,12 +67,13 @@ jobs:
     - name: Publish (self-contained single file)
       run: dotnet publish ${{ env.SOLUTION_FILE }} -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
 
-    # 👇 关键修复步骤：重命名 exe 为指定名称
-    - name: Rename exe to custom name
+    # 👇 重命名 exe，自动附加当前 Release 的版本号
+    - name: Rename exe with release version
       shell: pwsh
       run: |
-        $exeName = "$env:EXE_OUTPUT_NAME.exe"
-        # 找到 publish 目录下唯一的 exe 文件（通常只有一个）
+        $baseName = "$env:BASE_EXE_NAME"
+        $tag = "${{ github.event.release.tag_name }}"
+        $exeName = "${baseName}-${tag}.exe"
         $exe = Get-ChildItem -Path publish -Filter *.exe | Select-Object -First 1
         if ($exe) {
             $newPath = Join-Path publish $exeName
@@ -82,15 +84,14 @@ jobs:
             exit 1
         }
 
-    # 上传单个 exe 文件到 Release
+    # 上传带版本号的文件
     - name: Upload to Release Assets
       uses: softprops/action-gh-release@v2
       with:
-        files: publish/${{ env.EXE_OUTPUT_NAME }}.exe
+        files: publish/${{ env.BASE_EXE_NAME }}-${{ github.event.release.tag_name }}.exe
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    # （可选）备份 Artifact
     - name: Upload artifacts (backup)
       uses: actions/upload-artifact@v4
       with:
