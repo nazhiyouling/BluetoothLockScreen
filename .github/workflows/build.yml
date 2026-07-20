@@ -97,15 +97,16 @@ jobs:
             exit 1
         }
 
-    # 使用最新版上传 Action，增加重试配置
-    - name: Upload to Release Assets
-      uses: softprops/action-gh-release@v3
-      with:
-        files: publish/${{ env.BASE_EXE_NAME }}-${{ github.event.release.tag_name }}.exe
+    # 使用 GitHub CLI 上传 Release Assets（更可靠）
+    - name: Upload to Release using gh CLI
+      shell: pwsh
+      run: |
+        $file = "publish/$env:BASE_EXE_NAME-${{ github.event.release.tag_name }}.exe"
+        gh release upload ${{ github.event.release.tag_name }} $file --clobber
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      retry: 3   # 失败自动重试 3 次
 
+    # 备份 Artifact（可选）
     - name: Upload artifacts (backup)
       uses: actions/upload-artifact@v4
       with:
