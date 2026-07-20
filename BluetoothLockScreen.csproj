@@ -4,7 +4,7 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <UseWPF>true</UseWPF>
-    <!-- 不再包含 UseWindowsForms -->
+    <UseWindowsForms>true</UseWindowsForms>    <!-- 开启托盘功能 -->
     <ApplicationIcon>Resources\app.ico</ApplicationIcon>
     <Version>1.0.0</Version>
     <AssemblyName>BluetoothLockScreen</AssemblyName>
