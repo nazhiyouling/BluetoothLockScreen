@@ -8,7 +8,7 @@ env:
   SOLUTION_FILE: BluetoothLockScreen.sln
   BUILD_PLATFORM: x64
   DOTNET_VERSION: 8.0.x
-  BASE_EXE_NAME: 蓝牙锁屏监控
+  BASE_EXE_NAME: BluetoothLockScreen          # 改这里，用英文名
 
 jobs:
   build:
@@ -71,7 +71,6 @@ jobs:
         Write-Host "Clean version: $cleanVersion"
         dotnet publish ${{ env.SOLUTION_FILE }} -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:Version=$cleanVersion -o publish
 
-    # 复制 Resources 文件夹到发布目录（额外保险）
     - name: Copy Resources folder to publish output
       shell: pwsh
       run: |
