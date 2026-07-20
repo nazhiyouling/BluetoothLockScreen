@@ -14,18 +14,30 @@ namespace BluetoothLockScreen
         [DllImport("user32.dll")]
         private static extern void LockWorkStation();
 
+        // UI 更新委托
         private readonly Action<string> _updateStatus;
         private readonly Action<int> _updateRssi;
         private readonly Action<string> _updateDeviceName;
 
+        // 蓝牙设备
         private BluetoothLEDevice _device;
         private GattSession _session;
-        private BluetoothLEAdvertisementWatcher _watcher;
-        private int _rssiThreshold;
-        private int _currentRssi = int.MinValue;
-        private List<int> _rssiLog = new List<int>();
+        private BluetoothLEAdvertisementWatcher _rssiWatcher;
 
+        // 配置
+        private int _rssiThreshold;
+        private string _targetDeviceAddress;
+        private ulong _targetAddressUlong;
+
+        // 状态
         private bool _isMonitoring = false;
+        private int _currentRssi = int.MinValue;
+        private readonly List<int> _rssiLog = new List<int>();
+
+        // 重连相关
+        private bool _isReconnecting = false;
+        private readonly object _reconnectLock = new object();
+        private Task _reconnectTask;
 
         public BluetoothManager(Action<string> updateStatus, Action<int> updateRssi, Action<string> updateDeviceName)
         {
@@ -35,15 +47,13 @@ namespace BluetoothLockScreen
             _rssiThreshold = ConfigManager.Default.RssiThreshold;
         }
 
+        /// <summary>扫描附近 BLE 设备</summary>
         public async Task<List<BluetoothDeviceInfo>> ScanDevicesAsync()
         {
             var devices = new List<BluetoothDeviceInfo>();
-            var watcher = new BluetoothLEAdvertisementWatcher
-            {
-                ScanningMode = BluetoothLEScanningMode.Active
-            };
-
+            var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
             var tcs = new TaskCompletionSource<bool>();
+
             watcher.Received += (s, e) =>
             {
                 if (!string.IsNullOrEmpty(e.Advertisement.LocalName))
@@ -63,43 +73,90 @@ namespace BluetoothLockScreen
             await Task.Delay(5000);
             watcher.Stop();
             await tcs.Task;
-
             return devices;
         }
 
+        /// <summary>测试连接：仅获取一次 RSSI</summary>
+        public async Task<int?> TestConnectionAsync(string addressHexString)
+        {
+            try
+            {
+                ulong address = Convert.ToUInt64(addressHexString, 16);
+                using (var device = await BluetoothLEDevice.FromBluetoothAddressAsync(address))
+                {
+                    if (device == null) return null;
+
+                    var tcs = new TaskCompletionSource<int?>();
+                    var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
+                    watcher.Received += (s, e) =>
+                    {
+                        if (e.BluetoothAddress == address)
+                        {
+                            tcs.TrySetResult(e.RawSignalStrengthInDBm);
+                            watcher.Stop();
+                        }
+                    };
+                    watcher.Stopped += (s, e) => tcs.TrySetResult(null);
+                    watcher.Start();
+                    await Task.WhenAny(tcs.Task, Task.Delay(5000));
+                    watcher.Stop();
+                    return await tcs.Task;
+                }
+            }
+            catch { return null; }
+        }
+
+        /// <summary>开始监控指定设备（使用 MAC 地址字符串）</summary>
         public async Task StartMonitoringAsync(string addressHexString)
         {
-            if (_isMonitoring)
-                throw new InvalidOperationException("已经在监控中。");
+            if (_isMonitoring) throw new InvalidOperationException("已经在监控中。");
 
-            ulong address = Convert.ToUInt64(addressHexString, 16);
-            _device = await BluetoothLEDevice.FromBluetoothAddressAsync(address);
+            _targetDeviceAddress = addressHexString;
+            _targetAddressUlong = Convert.ToUInt64(addressHexString, 16);
+
+            await ConnectAndMonitorAsync();
+
+            _isMonitoring = true;
+            _updateStatus("监控中...");
+        }
+
+        /// <summary>执行真正的连接和监控设置</summary>
+        private async Task ConnectAndMonitorAsync()
+        {
+            // 先断开旧连接（如果有）
+            CleanupConnection();
+
+            _device = await BluetoothLEDevice.FromBluetoothAddressAsync(_targetAddressUlong);
             if (_device == null)
-                throw new Exception("无法找到指定的蓝牙设备，请确认设备已开启并在范围内。");
+                throw new Exception("无法找到指定的蓝牙设备，请确认手机已开启 BLE 广播。");
 
             _updateDeviceName(_device.Name);
 
             _session = await GattSession.FromDeviceIdAsync(_device.BluetoothDeviceId);
             if (_session == null)
-                throw new Exception("无法创建GATT会话。");
+                throw new Exception("无法创建 GATT 会话。");
 
-            _session.MaintainConnection = true;
+            _session.MaintainConnection = true;       // 系统级保活
             _session.SessionStatusChanged += OnSessionStatusChanged;
 
-            StartRssiWatcher(address);
-            _isMonitoring = true;
-            _updateStatus("监控中...");
+            StartRssiWatcher();
         }
 
+        /// <summary>停止监控（手动）</summary>
         public void StopMonitoring()
         {
             _isMonitoring = false;
             _updateStatus("已停止监控");
+            CleanupConnection();
+        }
 
-            if (_watcher != null)
+        /// <summary>清理连接和 RSSI 监听器</summary>
+        private void CleanupConnection()
+        {
+            if (_rssiWatcher != null)
             {
-                _watcher.Stop();
-                _watcher = null;
+                _rssiWatcher.Stop();
+                _rssiWatcher = null;
             }
 
             if (_session != null)
@@ -117,19 +174,16 @@ namespace BluetoothLockScreen
             }
         }
 
-        public void UpdateThreshold(int newThreshold)
-        {
-            _rssiThreshold = newThreshold;
-        }
+        /// <summary>更新 RSSI 阈值</summary>
+        public void UpdateThreshold(int newThreshold) => _rssiThreshold = newThreshold;
 
+        /// <summary>记录当前 RSSI</summary>
         public void RecordCurrentRssi()
         {
-            lock (_rssiLog)
-            {
-                _rssiLog.Add(_currentRssi);
-            }
+            lock (_rssiLog) { _rssiLog.Add(_currentRssi); }
         }
 
+        /// <summary>保存 RSSI 日志文件</summary>
         public void SaveRssiLog()
         {
             lock (_rssiLog)
@@ -142,49 +196,96 @@ namespace BluetoothLockScreen
                     {
                         writer.WriteLine($"--- RSSI记录 ({DateTime.Now:yyyy-MM-dd HH:mm:ss}) ---");
                         foreach (var rssi in _rssiLog)
-                        {
                             writer.WriteLine($"{DateTime.Now:HH:mm:ss} - {rssi} dBm");
-                        }
                     }
                 }
-                catch { }
+                catch { /* 忽略写入错误 */ }
             }
         }
 
-        private void StartRssiWatcher(ulong targetAddress)
+        /// <summary>启动 BLE 广告包监听（获取 RSSI）</summary>
+        private void StartRssiWatcher()
         {
-            _watcher = new BluetoothLEAdvertisementWatcher
+            _rssiWatcher = new BluetoothLEAdvertisementWatcher
             {
                 ScanningMode = BluetoothLEScanningMode.Active
             };
 
-            _watcher.Received += (s, e) =>
+            _rssiWatcher.Received += (s, e) =>
             {
-                if (e.BluetoothAddress == targetAddress)
+                if (e.BluetoothAddress == _targetAddressUlong)
                 {
                     int rssi = e.RawSignalStrengthInDBm;
                     _currentRssi = rssi;
                     _updateRssi(rssi);
 
-                    if (rssi < _rssiThreshold && _isMonitoring)
+                    // RSSI 低于阈值触发锁屏
+                    if (_isMonitoring && rssi < _rssiThreshold)
                     {
                         LockWorkStation();
                         _updateStatus("已触发锁屏（RSSI过低）");
                     }
                 }
             };
-
-            _watcher.Start();
+            _rssiWatcher.Start();
         }
 
-        private void OnSessionStatusChanged(GattSession sender, GattSessionStatusChangedEventArgs args)
+        /// <summary>GATT 会话状态变化（连接断开时触发）</summary>
+        private async void OnSessionStatusChanged(GattSession sender, GattSessionStatusChangedEventArgs args)
         {
-            // 断连或会话关闭都触发锁屏
-            if (args.Status == GattSessionStatus.Closed)
+            if (args.Status == GattSessionStatus.Closed)  // 断开连接
+            {
+                // 如果是主动停止监控，则不再重连
+                if (!_isMonitoring) return;
+
+                _updateStatus("蓝牙连接断开，正在尝试重连...");
+
+                // 防止重复重连
+                lock (_reconnectLock)
+                {
+                    if (_isReconnecting) return;
+                    _isReconnecting = true;
+                }
+
+                // 开始重连任务
+                _reconnectTask = ReconnectAsync();
+                await _reconnectTask;
+            }
+        }
+
+        /// <summary>自动重连逻辑：最多尝试 30 秒</summary>
+        private async Task ReconnectAsync()
+        {
+            int maxAttempts = 6;      // 每 5 秒尝试一次，最多 6 次 = 30 秒
+            bool reconnected = false;
+
+            for (int i = 0; i < maxAttempts; i++)
+            {
+                try
+                {
+                    await Task.Delay(5000);   // 间隔 5 秒
+
+                    // 再次检查监控状态，若已手动停止则退出
+                    if (!_isMonitoring) break;
+
+                    await ConnectAndMonitorAsync();
+                    reconnected = true;
+                    _updateStatus("蓝牙已重新连接");
+                    break;
+                }
+                catch
+                {
+                    // 忽略单次重连失败，继续尝试
+                }
+            }
+
+            lock (_reconnectLock) { _isReconnecting = false; }
+
+            // 如果所有尝试均失败，则认为设备真的远离，执行锁屏
+            if (!reconnected && _isMonitoring)
             {
                 LockWorkStation();
-                _updateStatus("已触发锁屏（蓝牙断开）");
-                _isMonitoring = false;
+                _updateStatus("已触发锁屏（蓝牙断开且无法重连）");
                 StopMonitoring();
             }
         }
