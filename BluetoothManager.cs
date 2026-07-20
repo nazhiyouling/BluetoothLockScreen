@@ -256,14 +256,14 @@ namespace BluetoothLockScreen
         /// <summary>自动重连逻辑：最多尝试 30 秒</summary>
         private async Task ReconnectAsync()
         {
-            int maxAttempts = 6;      // 每 5 秒尝试一次，最多 6 次 = 30 秒
+            int maxAttempts = 2;      // 每 2 秒尝试一次，最多 2 次 =   秒
             bool reconnected = false;
 
             for (int i = 0; i < maxAttempts; i++)
             {
                 try
                 {
-                    await Task.Delay(5000);   // 间隔 5 秒
+                    await Task.Delay(2000);   // 间隔 2 秒
 
                     // 再次检查监控状态，若已手动停止则退出
                     if (!_isMonitoring) break;
