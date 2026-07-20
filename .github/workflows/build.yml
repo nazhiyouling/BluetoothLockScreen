@@ -8,7 +8,7 @@ env:
   SOLUTION_FILE: BluetoothLockScreen.sln
   BUILD_PLATFORM: x64
   DOTNET_VERSION: 8.0.x
-  BASE_EXE_NAME: BluetoothLockScreen
+  BASE_EXE_NAME: BluetoothLockScreen   # 基础名称
 
 jobs:
   build:
@@ -25,6 +25,7 @@ jobs:
       with:
         dotnet-version: ${{ env.DOTNET_VERSION }}
 
+    # 调试：查看资源文件夹内容
     - name: Debug - Show Resources folder content
       shell: pwsh
       run: |
@@ -37,7 +38,8 @@ jobs:
             Write-Host "Resources folder does NOT exist."
         }
 
-    - name: Fix icon files (case-insensitive match, fallback placeholder)
+    # 修复图标文件名（大小写不敏感，缺失时生成占位）
+    - name: Fix icon files
       shell: pwsh
       run: |
         if (-not (Test-Path "Resources")) { New-Item -ItemType Directory -Path "Resources" }
@@ -63,52 +65,44 @@ jobs:
     - name: Build solution
       run: dotnet build ${{ env.SOLUTION_FILE }} -c Release /p:Platform=${{ env.BUILD_PLATFORM }} --no-restore
 
-    - name: Publish (self-contained single file)
+    # 🟢 关键修改：发布为多文件自包含，生成文件夹
+    - name: Publish (multi-file self-contained)
       shell: pwsh
       run: |
         $rawTag = "${{ github.event.release.tag_name }}"
         $cleanVersion = $rawTag -replace '^[vV]', ''
         Write-Host "Clean version: $cleanVersion"
-        dotnet publish ${{ env.SOLUTION_FILE }} -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:Version=$cleanVersion -o publish
+        dotnet publish ${{ env.SOLUTION_FILE }} -c Release -r win-x64 --self-contained true -p:Version=$cleanVersion -o publish
 
+    # 复制 Resources 文件夹（如果代码中还有外部图标引用，则备用）
     - name: Copy Resources folder to publish output
       shell: pwsh
       run: |
         if (Test-Path "Resources") {
             Copy-Item -Path "Resources" -Destination "publish\Resources" -Recurse -Force
             Write-Host "Resources folder copied to publish"
-        } else {
-            Write-Host "Resources folder not found, skipping copy"
         }
 
-    - name: Rename exe with release version
+    # 将整个发布文件夹压缩为 zip，并以版本号命名
+    - name: Zip the publish folder
       shell: pwsh
       run: |
-        $baseName = "$env:BASE_EXE_NAME"
         $tag = "${{ github.event.release.tag_name }}"
-        $exeName = "${baseName}-${tag}.exe"
-        $exe = Get-ChildItem -Path publish -Filter *.exe | Select-Object -First 1
-        if ($exe) {
-            $newPath = Join-Path publish $exeName
-            Write-Host "Renaming '$($exe.Name)' to '$exeName'"
-            Move-Item -Path $exe.FullName -Destination $newPath -Force
-        } else {
-            Write-Host "No exe file found in publish directory!"
-            exit 1
-        }
+        $zipName = "${{ env.BASE_EXE_NAME }}-${tag}.zip"
+        Compress-Archive -Path publish\* -DestinationPath $zipName
+        Write-Host "Created $zipName"
 
-    # 使用 GitHub CLI 上传 Release Assets（更可靠）
-    - name: Upload to Release using gh CLI
-      shell: pwsh
-      run: |
-        $file = "publish/$env:BASE_EXE_NAME-${{ github.event.release.tag_name }}.exe"
-        gh release upload ${{ github.event.release.tag_name }} $file --clobber
+    # 上传 zip 到 Release Assets
+    - name: Upload zip to Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: ${{ env.BASE_EXE_NAME }}-${{ github.event.release.tag_name }}.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    # 备份 Artifact（可选）
+    # 备份：上传原始 publish 文件夹作为 artifact
     - name: Upload artifacts (backup)
       uses: actions/upload-artifact@v4
       with:
-        name: BluetoothLockScreen-Release
+        name: BluetoothLockScreen-Publish
         path: publish/
