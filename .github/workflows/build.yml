@@ -8,7 +8,7 @@ env:
   SOLUTION_FILE: BluetoothLockScreen.sln
   BUILD_PLATFORM: x64
   DOTNET_VERSION: 8.0.x
-  BASE_EXE_NAME: BluetoothLockScreen          # 改这里，用英文名
+  BASE_EXE_NAME: BluetoothLockScreen
 
 jobs:
   build:
@@ -97,12 +97,14 @@ jobs:
             exit 1
         }
 
+    # 使用最新版上传 Action，增加重试配置
     - name: Upload to Release Assets
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         files: publish/${{ env.BASE_EXE_NAME }}-${{ github.event.release.tag_name }}.exe
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      retry: 3   # 失败自动重试 3 次
 
     - name: Upload artifacts (backup)
       uses: actions/upload-artifact@v4
