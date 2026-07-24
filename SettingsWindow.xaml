@@ -40,28 +40,24 @@
         <TextBlock x:Name="TestResultText" Grid.Row="3" Text=""
                    FontSize="12" Margin="0,0,0,5" Foreground="DarkGreen"/>
 
-        <!-- 蓝牙设备扫描区 -->
-        <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,0,0,5">
-            <Button x:Name="ScanButton" Content="扫描设备" Width="100" Click="ScanButton_Click"/>
-            <TextBlock x:Name="ScanStatus" Text="未扫描" VerticalAlignment="Center"
-                       Margin="10,0,0,0" Foreground="Gray"/>
+        <!-- 已配对设备区域 -->
+        <StackPanel Grid.Row="4" Margin="0,10,0,5">
+            <TextBlock Text="已配对的蓝牙设备（点击选择）" FontWeight="Bold" Margin="0,0,0,5"/>
+            <Button x:Name="RefreshPairedButton" Content="刷新列表" Width="100"
+                    Click="RefreshPairedButton_Click" Margin="0,0,0,5"/>
+            <ListBox x:Name="PairedDeviceListBox" DisplayMemberPath="DisplayName"
+                     SelectionChanged="PairedDeviceListBox_SelectionChanged"
+                     Height="150"/>
         </StackPanel>
 
-        <!-- 设备列表 -->
-        <ListBox x:Name="DeviceListBox" Grid.Row="5" DisplayMemberPath="DisplayName"
-                 SelectionChanged="DeviceListBox_SelectionChanged"
-                 Margin="0,0,0,10" Height="120"/>
-
-        <!-- 记录RSSI按钮 -->
-        <Button Grid.Row="6" Content="📝 记录当前RSSI值" Height="35"
+        <!-- 记录RSSI按钮及显示 -->
+        <Button Grid.Row="5" Content="📝 记录当前RSSI值" Height="35"
                 Margin="0,0,0,5" Click="RecordRssiButton_Click"/>
-
-        <!-- 最近记录显示 -->
-        <TextBlock Grid.Row="7" x:Name="LastRssiText" Text="尚未记录"
+        <TextBlock Grid.Row="6" x:Name="LastRssiText" Text="尚未记录"
                    FontSize="12" Foreground="DimGray" Margin="0,0,0,5" TextWrapping="Wrap"/>
 
         <!-- 保存与关闭 -->
-        <StackPanel Grid.Row="8" Orientation="Horizontal" HorizontalAlignment="Right">
+        <StackPanel Grid.Row="7" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Content="保存设置" Width="100" Height="30" Click="SaveButton_Click"/>
             <Button Content="取消" Width="100" Height="30" Margin="10,0,0,0"
                     Click="CancelButton_Click"/>
