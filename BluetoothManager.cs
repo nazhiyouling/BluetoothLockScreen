@@ -12,16 +12,13 @@ namespace BluetoothLockScreen
 {
     public class BluetoothManager : IDisposable
     {
-        // 锁屏 API
         [DllImport("user32.dll")]
         private static extern void LockWorkStation();
 
-        // UI 更新委托
         private readonly Action<string> _updateStatus;
         private readonly Action<int> _updateRssi;
         private readonly Action<string> _updateDeviceName;
 
-        // 蓝牙设备相关
         private BluetoothLEDevice _device;
         private GattSession _session;
         private BluetoothLEAdvertisementWatcher _watcher;
@@ -29,13 +26,16 @@ namespace BluetoothLockScreen
         private int _currentRssi = int.MinValue;
         private List<int> _rssiLog = new List<int>();
 
-        // 状态控制
         private bool _isMonitoring = false;
-        private string _deviceAddressStr;              // 保存的蓝牙地址字符串
-        private Timer _reconnectTimer;                 // 保活检查定时器
-        private bool _isReconnecting = false;          // 防止重连重入
+        private string _deviceAddressStr;
+        private Timer _reconnectTimer;
+        private bool _isReconnecting = false;
 
-        private const int ReconnectIntervalMs = 5000;  // 每5秒检查一次
+        private const int ReconnectIntervalMs = 5000;
+
+        // 统一数据目录
+        private static readonly string DataFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data");
+        private static readonly string RssiLogPath = Path.Combine(DataFolder, "rssi_log.txt");
 
         public BluetoothManager(Action<string> updateStatus, Action<int> updateRssi, Action<string> updateDeviceName)
         {
@@ -44,10 +44,11 @@ namespace BluetoothLockScreen
             _updateDeviceName = updateDeviceName;
             _rssiThreshold = ConfigManager.Default.RssiThreshold;
 
-            // 初始化保活定时器
             _reconnectTimer = new Timer(ReconnectIntervalMs);
             _reconnectTimer.AutoReset = true;
             _reconnectTimer.Elapsed += OnReconnectTimerElapsed;
+
+            EnsureDataFolderExists();
         }
 
         // ---------- 扫描 ----------
@@ -62,7 +63,6 @@ namespace BluetoothLockScreen
             var tcs = new TaskCompletionSource<bool>();
             watcher.Received += (s, e) =>
             {
-                // 不再过滤无名称的设备，避免漏掉 BLE 锚点
                 string displayName;
                 if (!string.IsNullOrEmpty(e.Advertisement.LocalName))
                 {
@@ -115,41 +115,47 @@ namespace BluetoothLockScreen
             CleanupConnection();
         }
 
-        // ---------- 设置 ----------
         public void UpdateThreshold(int newThreshold)
         {
             _rssiThreshold = newThreshold;
         }
 
-        // ---------- RSSI 日志 ----------
-        public void RecordCurrentRssi()
+        // ---------- RSSI 记录（即时写入） ----------
+        public int RecordAndGetRssi()
         {
+            int rssi = _currentRssi;
             lock (_rssiLog)
             {
-                _rssiLog.Add(_currentRssi);
+                _rssiLog.Add(rssi);
             }
+            AppendRssiToFile(rssi);
+            return rssi;
         }
 
+        // 追加一条记录到日志文件
+        private void AppendRssiToFile(int rssi)
+        {
+            EnsureDataFolderExists();
+            try
+            {
+                using (var writer = new StreamWriter(RssiLogPath, true))
+                {
+                    writer.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - {rssi} dBm");
+                }
+            }
+            catch { }
+        }
+
+        // 兼容旧方法（如果需要）
+        public void RecordCurrentRssi()
+        {
+            RecordAndGetRssi();
+        }
+
+        // 保存所有内存中的记录到日志（退出时调用，已不需要，但保留以防万一）
         public void SaveRssiLog()
         {
-            lock (_rssiLog)
-            {
-                if (_rssiLog.Count == 0) return;
-
-                string logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "rssi_log.txt");
-                try
-                {
-                    using (var writer = new StreamWriter(logPath, true))
-                    {
-                        writer.WriteLine($"--- RSSI记录 ({DateTime.Now:yyyy-MM-dd HH:mm:ss}) ---");
-                        foreach (var rssi in _rssiLog)
-                        {
-                            writer.WriteLine($"{DateTime.Now:HH:mm:ss} - {rssi} dBm");
-                        }
-                    }
-                }
-                catch { }
-            }
+            // 实际上每次记录已即时写入，这里可留空
         }
 
         // ---------- 测试连接 ----------
@@ -299,7 +305,6 @@ namespace BluetoothLockScreen
             }
             catch
             {
-                // 重连失败，下次定时器继续尝试
             }
             finally
             {
@@ -313,7 +318,14 @@ namespace BluetoothLockScreen
             {
                 LockWorkStation();
                 _updateStatus("已触发锁屏（蓝牙断开）");
-                // 定时器会自动尝试重连
+            }
+        }
+
+        private static void EnsureDataFolderExists()
+        {
+            if (!Directory.Exists(DataFolder))
+            {
+                Directory.CreateDirectory(DataFolder);
             }
         }
 
