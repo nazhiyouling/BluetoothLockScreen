@@ -6,13 +6,13 @@ namespace BluetoothLockScreen
     public partial class SettingsWindow : Window
     {
         private readonly BluetoothManager _btManager;
-        private ObservableCollection<BluetoothDeviceInfo> _devices = new ObservableCollection<BluetoothDeviceInfo>();
+        private ObservableCollection<BluetoothDeviceInfo> _pairedDevices = new ObservableCollection<BluetoothDeviceInfo>();
 
         public SettingsWindow(BluetoothManager btManager)
         {
             InitializeComponent();
             _btManager = btManager;
-            DeviceListBox.ItemsSource = _devices;
+            PairedDeviceListBox.ItemsSource = _pairedDevices;
 
             // 初始化控件值
             RssiThresholdBox.Text = ConfigManager.Default.RssiThreshold.ToString();
@@ -22,35 +22,37 @@ namespace BluetoothLockScreen
             }
         }
 
-        private async void ScanButton_Click(object sender, RoutedEventArgs e)
+        private async void RefreshPairedButton_Click(object sender, RoutedEventArgs e)
         {
-            ScanButton.IsEnabled = false;
-            ScanStatus.Text = "正在扫描...";
-            _devices.Clear();
+            RefreshPairedButton.IsEnabled = false;
+            _pairedDevices.Clear();
 
             try
             {
-                var devices = await _btManager.ScanDevicesAsync();
+                var devices = await _btManager.GetPairedDevicesAsync();
                 foreach (var device in devices)
                 {
-                    _devices.Add(device);
+                    _pairedDevices.Add(device);
                 }
-                ScanStatus.Text = $"扫描完成，发现 {_devices.Count} 个设备";
+                if (_pairedDevices.Count == 0)
+                {
+                    MessageBox.Show("未找到任何已配对的蓝牙设备。\n请先在 Windows 设置中配对手机。",
+                                    "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
             }
             catch (System.Exception ex)
             {
-                MessageBox.Show($"扫描失败：{ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
-                ScanStatus.Text = "扫描失败";
+                MessageBox.Show($"获取已配对设备失败：{ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
             }
             finally
             {
-                ScanButton.IsEnabled = true;
+                RefreshPairedButton.IsEnabled = true;
             }
         }
 
-        private void DeviceListBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        private void PairedDeviceListBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
         {
-            var selected = DeviceListBox.SelectedItem as BluetoothDeviceInfo;
+            var selected = PairedDeviceListBox.SelectedItem as BluetoothDeviceInfo;
             if (selected != null)
             {
                 ManualAddressBox.Text = selected.Address.ToString("X12");
@@ -98,10 +100,9 @@ namespace BluetoothLockScreen
 
         private void RecordRssiButton_Click(object sender, RoutedEventArgs e)
         {
-            // 获取当前 RSSI 并记录（BluetoothManager 内部会存储到列表并立即写入文件）
-            int lastRssi = _btManager.RecordAndGetRssi();   // 新增方法，返回记录的 RSSI 值
-            LastRssiText.Text = $"上次记录: {lastRssi} dBm   (日志文件: rssi_log.txt)";
-            MessageBox.Show($"当前 RSSI 值已记录：{lastRssi} dBm\n日志文件保存在程序目录下的 rssi_log.txt",
+            int lastRssi = _btManager.RecordAndGetRssi();
+            LastRssiText.Text = $"上次记录: {lastRssi} dBm   (日志文件: data/rssi_log.txt)";
+            MessageBox.Show($"当前 RSSI 值已记录：{lastRssi} dBm\n日志文件保存在程序目录下的 data/rssi_log.txt",
                             "记录成功", MessageBoxButton.OK, MessageBoxImage.Information);
         }
 
@@ -122,7 +123,7 @@ namespace BluetoothLockScreen
             }
             else
             {
-                var selectedDevice = DeviceListBox.SelectedItem as BluetoothDeviceInfo;
+                var selectedDevice = PairedDeviceListBox.SelectedItem as BluetoothDeviceInfo;
                 if (selectedDevice != null)
                 {
                     ConfigManager.Default.DeviceAddress = selectedDevice.Address.ToString("X12");
@@ -130,7 +131,7 @@ namespace BluetoothLockScreen
                 }
                 else
                 {
-                    MessageBox.Show("请先扫描选择设备或手动输入蓝牙地址。", "提示",
+                    MessageBox.Show("请先从已配对设备列表中选择一个设备，或手动输入蓝牙地址。", "提示",
                         MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
