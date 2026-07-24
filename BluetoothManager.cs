@@ -12,6 +12,7 @@ namespace BluetoothLockScreen
 {
     public class BluetoothManager : IDisposable
     {
+        // 锁屏 API
         [DllImport("user32.dll")]
         private static extern void LockWorkStation();
 
@@ -30,12 +31,11 @@ namespace BluetoothLockScreen
 
         // 状态控制
         private bool _isMonitoring = false;
-        private string _deviceAddressStr;                  // 保存的蓝牙地址字符串
-        private Timer _reconnectTimer;                     // 保活检查定时器
-        private bool _isReconnecting = false;              // 防止重连重入
+        private string _deviceAddressStr;              // 保存的蓝牙地址字符串
+        private Timer _reconnectTimer;                 // 保活检查定时器
+        private bool _isReconnecting = false;          // 防止重连重入
 
-        // 断开自动重连间隔（毫秒）
-        private const int ReconnectIntervalMs = 5000;      // 每5秒检查一次
+        private const int ReconnectIntervalMs = 5000;  // 每5秒检查一次
 
         public BluetoothManager(Action<string> updateStatus, Action<int> updateRssi, Action<string> updateDeviceName)
         {
@@ -50,9 +50,7 @@ namespace BluetoothLockScreen
             _reconnectTimer.Elapsed += OnReconnectTimerElapsed;
         }
 
-        /// <summary>
-        /// 扫描附近的 BLE 设备（只返回有名称的设备）
-        /// </summary>
+        // ---------- 扫描 ----------
         public async Task<List<BluetoothDeviceInfo>> ScanDevicesAsync()
         {
             var devices = new List<BluetoothDeviceInfo>();
@@ -64,16 +62,25 @@ namespace BluetoothLockScreen
             var tcs = new TaskCompletionSource<bool>();
             watcher.Received += (s, e) =>
             {
+                // 不再过滤无名称的设备，避免漏掉 BLE 锚点
+                string displayName;
                 if (!string.IsNullOrEmpty(e.Advertisement.LocalName))
                 {
-                    var info = new BluetoothDeviceInfo
-                    {
-                        Address = e.BluetoothAddress,
-                        DisplayName = $"{e.Advertisement.LocalName} ({e.BluetoothAddress:X})"
-                    };
-                    if (!devices.Exists(d => d.Address == info.Address))
-                        devices.Add(info);
+                    displayName = e.Advertisement.LocalName;
                 }
+                else
+                {
+                    displayName = "未知设备";
+                }
+                displayName += $" ({e.BluetoothAddress:X12})";
+
+                var info = new BluetoothDeviceInfo
+                {
+                    Address = e.BluetoothAddress,
+                    DisplayName = displayName
+                };
+                if (!devices.Exists(d => d.Address == info.Address))
+                    devices.Add(info);
             };
             watcher.Stopped += (s, e) => tcs.TrySetResult(true);
 
@@ -85,9 +92,7 @@ namespace BluetoothLockScreen
             return devices;
         }
 
-        /// <summary>
-        /// 开始监控指定蓝牙设备（建立连接并启动 RSSI 观察）
-        /// </summary>
+        // ---------- 监控控制 ----------
         public async Task StartMonitoringAsync(string addressHexString)
         {
             if (_isMonitoring)
@@ -96,36 +101,27 @@ namespace BluetoothLockScreen
             _deviceAddressStr = addressHexString;
             await ConnectAndMonitorAsync(Convert.ToUInt64(addressHexString, 16));
 
-            // 启动保活定时器
             StartReconnectTimer();
             _isMonitoring = true;
             _updateStatus("监控中...");
         }
 
-        /// <summary>
-        /// 停止监控，关闭连接并释放资源
-        /// </summary>
         public void StopMonitoring()
         {
             _isMonitoring = false;
             _updateStatus("已停止监控");
 
             StopReconnectTimer();
-
             CleanupConnection();
         }
 
-        /// <summary>
-        /// 更新锁屏阈值
-        /// </summary>
+        // ---------- 设置 ----------
         public void UpdateThreshold(int newThreshold)
         {
             _rssiThreshold = newThreshold;
         }
 
-        /// <summary>
-        /// 记录当前 RSSI 到内存列表（关闭时写入日志）
-        /// </summary>
+        // ---------- RSSI 日志 ----------
         public void RecordCurrentRssi()
         {
             lock (_rssiLog)
@@ -134,9 +130,6 @@ namespace BluetoothLockScreen
             }
         }
 
-        /// <summary>
-        /// 保存所有记录的 RSSI 到日志文件
-        /// </summary>
         public void SaveRssiLog()
         {
             lock (_rssiLog)
@@ -155,55 +148,50 @@ namespace BluetoothLockScreen
                         }
                     }
                 }
-                catch { /* 写入失败静默处理 */ }
+                catch { }
             }
         }
 
-        // ------------------------- 保活与自动重连 -------------------------
-
-        private void StartReconnectTimer()
+        // ---------- 测试连接 ----------
+        public async Task<int?> TestConnectionAsync(string addressHexString)
         {
-            _reconnectTimer.Start();
-        }
-
-        private void StopReconnectTimer()
-        {
-            _reconnectTimer.Stop();
-        }
-
-        private async void OnReconnectTimerElapsed(object sender, ElapsedEventArgs e)
-        {
-            // 防止重入
-            if (_isReconnecting || !_isMonitoring || string.IsNullOrEmpty(_deviceAddressStr))
-                return;
-
             try
             {
-                // 检查设备连接状态
-                bool needReconnect = _device == null || _device.ConnectionStatus != BluetoothConnectionStatus.Connected;
-                if (needReconnect)
+                ulong address = Convert.ToUInt64(addressHexString, 16);
+                using (var device = await BluetoothLEDevice.FromBluetoothAddressAsync(address))
                 {
-                    _isReconnecting = true;
-                    _updateStatus("连接断开，正在重连...");
-                    CleanupConnection();  // 清理旧连接
+                    if (device == null) return null;
 
-                    ulong address = Convert.ToUInt64(_deviceAddressStr, 16);
-                    await ConnectAndMonitorAsync(address);
-                    _updateStatus("已重连，监控中...");
+                    var tcs = new TaskCompletionSource<int?>();
+                    var watcher = new BluetoothLEAdvertisementWatcher
+                    {
+                        ScanningMode = BluetoothLEScanningMode.Active
+                    };
+                    watcher.Received += (s, e) =>
+                    {
+                        if (e.BluetoothAddress == address)
+                        {
+                            tcs.TrySetResult(e.RawSignalStrengthInDBm);
+                            watcher.Stop();
+                        }
+                    };
+                    watcher.Stopped += (s, e) => tcs.TrySetResult(null);
+                    watcher.Start();
+                    var delayTask = Task.Delay(5000);
+                    var resultTask = await Task.WhenAny(tcs.Task, delayTask);
+                    watcher.Stop();
+                    if (resultTask is Task<int?> rssiTask)
+                        return await rssiTask;
+                    return null;
                 }
             }
-            catch (Exception ex)
+            catch
             {
-                _updateStatus($"重连失败：{ex.Message}");
-                // 下次定时器触发继续尝试
-            }
-            finally
-            {
-                _isReconnecting = false;
+                return null;
             }
         }
 
-        // 实际建立连接和 RSSI 监听
+        // ---------- 内部连接逻辑 ----------
         private async Task ConnectAndMonitorAsync(ulong address)
         {
             _device = await BluetoothLEDevice.FromBluetoothAddressAsync(address);
@@ -220,7 +208,6 @@ namespace BluetoothLockScreen
 
             _updateDeviceName(_device.Name);
 
-            // 创建 GATT 会话并设置保持连接
             _session = await GattSession.FromDeviceIdAsync(_device.BluetoothDeviceId);
             if (_session == null)
                 throw new Exception("无法创建GATT会话。");
@@ -228,7 +215,6 @@ namespace BluetoothLockScreen
             _session.MaintainConnection = true;
             _session.SessionStatusChanged += OnSessionStatusChanged;
 
-            // 启动 RSSI 监听
             StartRssiWatcher(address);
         }
 
@@ -247,7 +233,6 @@ namespace BluetoothLockScreen
                     _currentRssi = rssi;
                     _updateRssi(rssi);
 
-                    // RSSI 低于阈值立即锁屏
                     if (rssi < _rssiThreshold && _isMonitoring)
                     {
                         LockWorkStation();
@@ -282,15 +267,53 @@ namespace BluetoothLockScreen
             }
         }
 
+        // ---------- 保活与自动重连 ----------
+        private void StartReconnectTimer()
+        {
+            _reconnectTimer.Start();
+        }
+
+        private void StopReconnectTimer()
+        {
+            _reconnectTimer.Stop();
+        }
+
+        private async void OnReconnectTimerElapsed(object sender, ElapsedEventArgs e)
+        {
+            if (_isReconnecting || !_isMonitoring || string.IsNullOrEmpty(_deviceAddressStr))
+                return;
+
+            try
+            {
+                bool needReconnect = _device == null || _device.ConnectionStatus != BluetoothConnectionStatus.Connected;
+                if (needReconnect)
+                {
+                    _isReconnecting = true;
+                    _updateStatus("连接断开，正在重连...");
+                    CleanupConnection();
+
+                    ulong address = Convert.ToUInt64(_deviceAddressStr, 16);
+                    await ConnectAndMonitorAsync(address);
+                    _updateStatus("已重连，监控中...");
+                }
+            }
+            catch
+            {
+                // 重连失败，下次定时器继续尝试
+            }
+            finally
+            {
+                _isReconnecting = false;
+            }
+        }
+
         private void OnSessionStatusChanged(GattSession sender, GattSessionStatusChangedEventArgs args)
         {
             if (args.Status == GattSessionStatus.Closed)
             {
-                // 连接断开立即锁屏，然后定时器会自动重连
                 LockWorkStation();
                 _updateStatus("已触发锁屏（蓝牙断开）");
-                // 注意：不要在这里直接调用 StopMonitoring，让定时器负责重连
-                // 但需要标记断开状态，防止重复锁屏（在定时器重连前再次触发）
+                // 定时器会自动尝试重连
             }
         }
 
