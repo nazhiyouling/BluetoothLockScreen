@@ -36,9 +36,9 @@ namespace BluetoothLockScreen
                 }
                 if (_pairedDevices.Count == 0)
                 {
-                    MessageBox.Show("未找到任何已配对的蓝牙设备。\n请先在 Windows 设置中配对手机。",
-                                    "提示", MessageBoxButton.OK, MessageBoxImage.Information);
-                }
+    MessageBox.Show("未找到已配对设备。\n\n请确保手机蓝牙已开启并与电脑配对。\n也可以尝试使用“扫描设备”功能，将手机靠近电脑扫描信号最强的设备。",
+                    "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+}
             }
             catch (System.Exception ex)
             {
