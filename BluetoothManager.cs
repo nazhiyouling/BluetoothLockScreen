@@ -52,41 +52,71 @@ namespace BluetoothLockScreen
         }
 
         // ---------- 获取已配对的蓝牙设备（改进版） ----------
-        public async Task<List<BluetoothDeviceInfo>> GetPairedDevicesAsync()
+public async Task<List<BluetoothDeviceInfo>> GetPairedDevicesAsync()
+{
+    var devices = new List<BluetoothDeviceInfo>();
+    
+    try
+    {
+        // 方式1: 使用系统配对状态选择器（最直接）
+        string pairedSelector = BluetoothDevice.GetDeviceSelectorFromPairingState(true);
+        var pairedDevices = await DeviceInformation.FindAllAsync(pairedSelector);
+        
+        foreach (var deviceInfo in pairedDevices)
         {
-            var devices = new List<BluetoothDeviceInfo>();
-            // 获取所有蓝牙协议设备（包括经典和 BLE）
-            string selector = "System.Devices.Aep.ProtocolId:=\"{E0CBF06C-CD8B-4647-BB8A-263B43F0F974}\"";
-            var deviceCollection = await DeviceInformation.FindAllAsync(selector);
-
-            foreach (var deviceInfo in deviceCollection)
+            AddDeviceToList(devices, deviceInfo);
+        }
+        
+        // 如果方式1返回空，尝试方式2: 枚举所有蓝牙设备，手动过滤配对状态
+        if (devices.Count == 0)
+        {
+            string allBluetoothSelector = "System.Devices.Aep.ProtocolId:=\"{E0CBF06C-CD8B-4647-BB8A-263B43F0F974}\"";
+            var allDevices = await DeviceInformation.FindAllAsync(allBluetoothSelector);
+            
+            foreach (var deviceInfo in allDevices)
             {
-                // 筛选已配对状态
                 if (deviceInfo.Pairing?.IsPaired == true)
                 {
-                    string name = deviceInfo.Name;
-                    string address = "";
-                    ulong addr = 0;
-
-                    if (deviceInfo.Properties.TryGetValue("System.Devices.Aep.DeviceAddress", out object prop))
-                    {
-                        address = prop.ToString();
-                        addr = Convert.ToUInt64(address.Replace(":", ""), 16);
-                    }
-                    else
-                    {
-                        continue;
-                    }
-
-                    devices.Add(new BluetoothDeviceInfo
-                    {
-                        Address = addr,
-                        DisplayName = $"{name} ({address})"
-                    });
+                    AddDeviceToList(devices, deviceInfo);
                 }
             }
-            return devices;
         }
+    }
+    catch (Exception ex)
+    {
+        System.Diagnostics.Debug.WriteLine($"获取已配对设备失败: {ex.Message}");
+    }
+    
+    return devices;
+}
+
+// 辅助方法：从 DeviceInformation 提取地址并添加到列表
+private void AddDeviceToList(List<BluetoothDeviceInfo> devices, DeviceInformation deviceInfo)
+{
+    string name = deviceInfo.Name;
+    string address = "";
+    ulong addr = 0;
+
+    if (deviceInfo.Properties.TryGetValue("System.Devices.Aep.DeviceAddress", out object prop))
+    {
+        address = prop.ToString();
+        addr = Convert.ToUInt64(address.Replace(":", ""), 16);
+    }
+    else
+    {
+        return; // 没有地址则忽略
+    }
+
+    // 避免重复
+    if (!devices.Exists(d => d.Address == addr))
+    {
+        devices.Add(new BluetoothDeviceInfo
+        {
+            Address = addr,
+            DisplayName = $"{name} ({address})"
+        });
+    }
+}
 
         // ---------- 扫描（备用） ----------
         public async Task<List<BluetoothDeviceInfo>> ScanDevicesAsync()
