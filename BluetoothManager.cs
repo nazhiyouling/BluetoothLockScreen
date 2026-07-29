@@ -122,6 +122,7 @@ private void AddDeviceToList(List<BluetoothDeviceInfo> devices, DeviceInformatio
 public async Task<List<BluetoothDeviceInfo>> ScanDevicesAsync()
 {
     var deviceDict = new Dictionary<ulong, BluetoothDeviceInfo>();
+    var targetUuid = Guid.Parse("0000ABCD-0000-1000-8000-00805F9B34FB");
     var watcher = new BluetoothLEAdvertisementWatcher
     {
         ScanningMode = BluetoothLEScanningMode.Active
@@ -130,15 +131,30 @@ public async Task<List<BluetoothDeviceInfo>> ScanDevicesAsync()
     var tcs = new TaskCompletionSource<bool>();
     watcher.Received += (s, e) =>
     {
-        string displayName;
-        // 优先使用短名称，其次完整名称，最后未知
-        if (!string.IsNullOrEmpty(e.Advertisement.ShortName))
-            displayName = e.Advertisement.ShortName;
-        else if (!string.IsNullOrEmpty(e.Advertisement.LocalName))
-            displayName = e.Advertisement.LocalName;
-        else
-            displayName = "未知设备";
+        // 检查广播包中是否包含我们的服务 UUID
+        bool isOurDevice = false;
+        foreach (var uuid in e.Advertisement.ServiceUuids)
+        {
+            if (uuid == targetUuid)
+            {
+                isOurDevice = true;
+                break;
+            }
+        }
 
+        string displayName;
+        if (isOurDevice)
+        {
+            displayName = "BLE-Anchor";
+        }
+        else if (!string.IsNullOrEmpty(e.Advertisement.LocalName))
+        {
+            displayName = e.Advertisement.LocalName;
+        }
+        else
+        {
+            displayName = "未知设备";
+        }
         displayName += $" ({e.BluetoothAddress:X12})";
 
         if (!deviceDict.ContainsKey(e.BluetoothAddress))
@@ -152,7 +168,6 @@ public async Task<List<BluetoothDeviceInfo>> ScanDevicesAsync()
         }
         else
         {
-            // 只更新 RSSI，保留第一次的名称
             deviceDict[e.BluetoothAddress].Rssi = e.RawSignalStrengthInDBm;
         }
     };
