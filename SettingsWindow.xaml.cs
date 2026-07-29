@@ -155,5 +155,6 @@ namespace BluetoothLockScreen
         public ulong Address { get; set; }
         public string DisplayName { get; set; } = "";
         public override string ToString() => DisplayName;
+        public int Rssi { get; set; } = int.MinValue;
     }
 }
