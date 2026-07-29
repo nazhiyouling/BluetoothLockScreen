@@ -119,45 +119,52 @@ private void AddDeviceToList(List<BluetoothDeviceInfo> devices, DeviceInformatio
 }
 
         // ---------- 扫描（备用） ----------
-        public async Task<List<BluetoothDeviceInfo>> ScanDevicesAsync()
+public async Task<List<BluetoothDeviceInfo>> ScanDevicesAsync()
+{
+    var deviceDict = new Dictionary<ulong, BluetoothDeviceInfo>();
+    var watcher = new BluetoothLEAdvertisementWatcher
+    {
+        ScanningMode = BluetoothLEScanningMode.Active
+    };
+
+    var tcs = new TaskCompletionSource<bool>();
+    watcher.Received += (s, e) =>
+    {
+        string displayName;
+        // 优先使用短名称，其次完整名称，最后未知
+        if (!string.IsNullOrEmpty(e.Advertisement.ShortName))
+            displayName = e.Advertisement.ShortName;
+        else if (!string.IsNullOrEmpty(e.Advertisement.LocalName))
+            displayName = e.Advertisement.LocalName;
+        else
+            displayName = "未知设备";
+
+        displayName += $" ({e.BluetoothAddress:X12})";
+
+        if (!deviceDict.ContainsKey(e.BluetoothAddress))
         {
-            var devices = new List<BluetoothDeviceInfo>();
-            var watcher = new BluetoothLEAdvertisementWatcher
+            deviceDict[e.BluetoothAddress] = new BluetoothDeviceInfo
             {
-                ScanningMode = BluetoothLEScanningMode.Active
+                Address = e.BluetoothAddress,
+                DisplayName = displayName,
+                Rssi = e.RawSignalStrengthInDBm
             };
-
-            var tcs = new TaskCompletionSource<bool>();
-            watcher.Received += (s, e) =>
-            {
-                string displayName;
-                if (!string.IsNullOrEmpty(e.Advertisement.LocalName))
-                {
-                    displayName = e.Advertisement.LocalName;
-                }
-                else
-                {
-                    displayName = "未知设备";
-                }
-                displayName += $" ({e.BluetoothAddress:X12})";
-
-                var info = new BluetoothDeviceInfo
-                {
-                    Address = e.BluetoothAddress,
-                    DisplayName = displayName
-                };
-                if (!devices.Exists(d => d.Address == info.Address))
-                    devices.Add(info);
-            };
-            watcher.Stopped += (s, e) => tcs.TrySetResult(true);
-
-            watcher.Start();
-            await Task.Delay(5000);
-            watcher.Stop();
-            await tcs.Task;
-
-            return devices;
         }
+        else
+        {
+            // 只更新 RSSI，保留第一次的名称
+            deviceDict[e.BluetoothAddress].Rssi = e.RawSignalStrengthInDBm;
+        }
+    };
+    watcher.Stopped += (s, e) => tcs.TrySetResult(true);
+
+    watcher.Start();
+    await Task.Delay(5000);
+    watcher.Stop();
+    await tcs.Task;
+
+    return deviceDict.Values.OrderByDescending(d => d.Rssi).ToList();
+}
 
         // ---------- 监控控制 ----------
         public async Task StartMonitoringAsync(string addressHexString)
