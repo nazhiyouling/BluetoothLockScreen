@@ -49,6 +49,8 @@
                      SelectionChanged="PairedDeviceListBox_SelectionChanged"
                      Height="150"/>
         </StackPanel>
+<TextBlock Grid.Row="4" Text="💡 将手机紧贴电脑蓝牙天线后再点扫描，信号最强的即是手机。扫描日志保存在 data/scan_log.txt"
+           FontSize="11" Foreground="Gray" Margin="0,5,0,0" TextWrapping="Wrap"/>
 
         <!-- 记录RSSI按钮及显示 -->
         <Button Grid.Row="5" Content="📝 记录当前RSSI值" Height="35"
