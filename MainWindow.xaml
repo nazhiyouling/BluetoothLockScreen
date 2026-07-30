@@ -4,7 +4,7 @@
         Title="蓝牙锁屏监控" Height="350" Width="500"
         MinHeight="300" MinWidth="400"
         WindowStartupLocation="CenterScreen"
-        Closing="MainWindow_Closing">
+        Closing="Window_Closing">
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="*"/>
@@ -16,29 +16,20 @@
             <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
 
-        <Border Grid.Row="0" Grid.Column="0" Grid.RowSpan="2"
-                Margin="10" Background="#F0F0F0" CornerRadius="8">
+        <Border Grid.Row="0" Grid.Column="0" Grid.RowSpan="2" Margin="10" Background="#F0F0F0" CornerRadius="8">
             <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
-                <TextBlock x:Name="StatusText" Text="未开始监控"
-                           FontSize="18" FontWeight="Bold" TextAlignment="Center"/>
-                <TextBlock x:Name="RssiText" Text="RSSI: --"
-                           FontSize="14" Margin="0,10,0,0" TextAlignment="Center"/>
-                <TextBlock x:Name="DeviceNameText" Text="未选择设备"
-                           FontSize="12" Foreground="Gray" TextAlignment="Center"
-                           Margin="0,5,0,0"/>
+                <TextBlock x:Name="StatusText" Text="未开始监控" FontSize="18" FontWeight="Bold" TextAlignment="Center"/>
+                <TextBlock x:Name="RssiText" Text="RSSI: --" FontSize="14" Margin="0,10,0,0" TextAlignment="Center"/>
+                <TextBlock x:Name="DeviceNameText" Text="未选择设备" FontSize="12" Foreground="Gray" TextAlignment="Center" Margin="0,5,0,0"/>
             </StackPanel>
         </Border>
 
-        <Button x:Name="StartStopButton" Grid.Row="0" Grid.Column="1"
-                Width="120" Height="120" Margin="10"
+        <Button x:Name="StartStopButton" Grid.Row="0" Grid.Column="1" Width="120" Height="120" Margin="10"
                 FontSize="16" FontWeight="Bold" Click="StartStopButton_Click">
-            <TextBlock TextAlignment="Center">
-                <Run Text="&#x25B6;"/><LineBreak/><Run Text="开始监控"/>
-            </TextBlock>
+            <TextBlock TextAlignment="Center"><Run Text="▶"/><LineBreak/><Run Text="开始监控"/></TextBlock>
         </Button>
 
-        <Button Grid.Row="1" Grid.Column="1" Width="120" Height="30"
-                Margin="10,0,10,10" Content="⚙ 设置"
-                FontSize="14" Click="SettingsButton_Click"/>
+        <Button Grid.Row="1" Grid.Column="1" Width="120" Height="30" Margin="10,0,10,10"
+                Content="⚙ 设置" FontSize="14" Click="SettingsButton_Click"/>
     </Grid>
 </Window>
