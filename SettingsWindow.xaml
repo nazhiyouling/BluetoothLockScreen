@@ -39,7 +39,7 @@
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"/>
                         <TextBlock Text=" (" />
-                        <TextBlock Text="{Binding Rssi, StringFormat='{0} dBm'}" Foreground="Gray"/>
+                        <TextBlock Text="{Binding Rssi, StringFormat='{}{0} dBm'}" Foreground="Gray"/>
                         <TextBlock Text=")" />
                     </StackPanel>
                 </DataTemplate>
