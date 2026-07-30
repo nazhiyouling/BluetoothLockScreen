@@ -79,7 +79,11 @@ namespace BluetoothLockScreen
             if (!_isMonitoring)
             {
                 var addr = ConfigManager.Default.DeviceAddress;
-                if (string.IsNullOrWhiteSpace(addr)) { MessageBox.Show("请先在设置中配置蓝牙设备。"); return; }
+                if (string.IsNullOrWhiteSpace(addr))
+                {
+                    System.Windows.MessageBox.Show("请先在设置中配置蓝牙设备。");
+                    return;
+                }
                 try
                 {
                     await _btManager.StartMonitoringAsync(addr);
@@ -88,7 +92,10 @@ namespace BluetoothLockScreen
                     StartStopButton.Background = new SolidColorBrush(Colors.IndianRed);
                     StartStopButton.Foreground = new SolidColorBrush(Colors.White);
                 }
-                catch (Exception ex) { MessageBox.Show($"启动失败：{ex.Message}"); }
+                catch (Exception ex)
+                {
+                    System.Windows.MessageBox.Show($"启动失败：{ex.Message}");
+                }
             }
             else
             {
