@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;   // 新增：支持 OrderByDescending
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Timers;
@@ -37,6 +37,7 @@ namespace BluetoothLockScreen
 
         private static readonly string DataFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data");
         private static readonly string RssiLogPath = Path.Combine(DataFolder, "rssi_log.txt");
+        private static readonly string ScanLogPath = Path.Combine(DataFolder, "scan_log.txt");
 
         public BluetoothManager(Action<string> updateStatus, Action<int> updateRssi, Action<string> updateDeviceName)
         {
@@ -52,26 +53,22 @@ namespace BluetoothLockScreen
             EnsureDataFolderExists();
         }
 
-        // ---------- 获取已配对的蓝牙设备（改进版） ----------
+        // ---------- 获取已配对的蓝牙设备 ----------
         public async Task<List<BluetoothDeviceInfo>> GetPairedDevicesAsync()
         {
             var devices = new List<BluetoothDeviceInfo>();
-            // 方式1: 使用系统配对状态选择器
             string pairedSelector = BluetoothDevice.GetDeviceSelectorFromPairingState(true);
             var pairedDevices = await DeviceInformation.FindAllAsync(pairedSelector);
             foreach (var deviceInfo in pairedDevices)
                 AddDeviceToList(devices, deviceInfo);
 
-            // 如果方式1返回空，尝试方式2: 枚举所有蓝牙设备，手动过滤配对状态
             if (devices.Count == 0)
             {
                 string allBluetoothSelector = "System.Devices.Aep.ProtocolId:=\"{E0CBF06C-CD8B-4647-BB8A-263B43F0F974}\"";
                 var allDevices = await DeviceInformation.FindAllAsync(allBluetoothSelector);
                 foreach (var deviceInfo in allDevices)
-                {
                     if (deviceInfo.Pairing?.IsPaired == true)
                         AddDeviceToList(devices, deviceInfo);
-                }
             }
             return devices;
         }
@@ -92,64 +89,65 @@ namespace BluetoothLockScreen
                 devices.Add(new BluetoothDeviceInfo { Address = addr, DisplayName = $"{name} ({address})" });
         }
 
-/// <summary>
-/// 扫描 BLE 设备，记录所有广播包到日志，按信号强度排序
-/// 内部版本: A2026.07.29.1800-PC
-/// </summary>
-public async Task<List<BluetoothDeviceInfo>> ScanDevicesAsync()
-{
-    var deviceDict = new Dictionary<ulong, BluetoothDeviceInfo>();
-    var logLines = new List<string> { $"=== 扫描开始 {DateTime.Now:yyyy-MM-dd HH:mm:ss} ===" };
-    var targetUuid = Guid.Parse("0000ABCD-0000-1000-8000-00805F9B34FB");
-
-    var watcher = new BluetoothLEAdvertisementWatcher
-    {
-        ScanningMode = BluetoothLEScanningMode.Active
-    };
-
-    var tcs = new TaskCompletionSource<bool>();
-    watcher.Received += (s, e) =>
-    {
-        // 记录每个广播包的详细信息
-        var uuids = string.Join(", ", e.Advertisement.ServiceUuids);
-        logLines.Add($"设备地址:{e.BluetoothAddress:X12}, 名称:{e.Advertisement.LocalName ?? "无"}, " +
-                     $"短名称:{e.Advertisement.ShortName ?? "无"}, RSSI:{e.RawSignalStrengthInDBm}, UUIDs:[{uuids}]");
-
-        if (!deviceDict.ContainsKey(e.BluetoothAddress))
+        // ---------- 扫描设备（诊断加强版，记录日志） ----------
+        /// <summary>
+        /// 扫描 BLE 设备，记录所有广播包到 data/scan_log.txt，按信号排序
+        /// 内部版本: A2026.07.30.0000-PC
+        /// </summary>
+        public async Task<List<BluetoothDeviceInfo>> ScanDevicesAsync()
         {
-            string displayName = !string.IsNullOrEmpty(e.Advertisement.LocalName)
-                ? e.Advertisement.LocalName
-                : "未知设备";
-            deviceDict[e.BluetoothAddress] = new BluetoothDeviceInfo
+            var deviceDict = new Dictionary<ulong, BluetoothDeviceInfo>();
+            var logLines = new List<string> { $"=== 扫描开始 {DateTime.Now:yyyy-MM-dd HH:mm:ss} ===" };
+            var targetUuid = Guid.Parse("0000ABCD-0000-1000-8000-00805F9B34FB");
+
+            var watcher = new BluetoothLEAdvertisementWatcher
             {
-                Address = e.BluetoothAddress,
-                DisplayName = $"{displayName} ({e.BluetoothAddress:X12})",
-                Rssi = e.RawSignalStrengthInDBm
+                ScanningMode = BluetoothLEScanningMode.Active
             };
+
+            var tcs = new TaskCompletionSource<bool>();
+            watcher.Received += (s, e) =>
+            {
+                // 记录详细信息：地址、名称、信号、UUID
+                var uuids = string.Join(", ", e.Advertisement.ServiceUuids);
+                logLines.Add($"设备:{e.BluetoothAddress:X12}, 名称:{e.Advertisement.LocalName ?? "无"}, " +
+                             $"RSSI:{e.RawSignalStrengthInDBm}, UUID:[{uuids}]");
+
+                if (!deviceDict.ContainsKey(e.BluetoothAddress))
+                {
+                    string displayName = !string.IsNullOrEmpty(e.Advertisement.LocalName)
+                        ? e.Advertisement.LocalName
+                        : "未知设备";
+                    deviceDict[e.BluetoothAddress] = new BluetoothDeviceInfo
+                    {
+                        Address = e.BluetoothAddress,
+                        DisplayName = $"{displayName} ({e.BluetoothAddress:X12})",
+                        Rssi = e.RawSignalStrengthInDBm
+                    };
+                }
+                else
+                {
+                    deviceDict[e.BluetoothAddress].Rssi = e.RawSignalStrengthInDBm;
+                }
+            };
+            watcher.Stopped += (s, e) => tcs.TrySetResult(true);
+
+            watcher.Start();
+            await Task.Delay(5000);
+            watcher.Stop();
+            await tcs.Task;
+
+            logLines.Add($"共发现 {deviceDict.Count} 个设备");
+            logLines.Add("=== 扫描结束 ===");
+            // 写入诊断日志
+            try
+            {
+                File.AppendAllLines(ScanLogPath, logLines);
+            }
+            catch { }
+
+            return deviceDict.Values.OrderByDescending(d => d.Rssi).ToList();
         }
-        else
-        {
-            deviceDict[e.BluetoothAddress].Rssi = e.RawSignalStrengthInDBm;
-        }
-    };
-    watcher.Stopped += (s, e) => tcs.TrySetResult(true);
-
-    watcher.Start();
-    await Task.Delay(5000);
-    watcher.Stop();
-    await tcs.Task;
-
-    logLines.Add($"扫描到 {deviceDict.Count} 个设备");
-    logLines.Add("=== 扫描结束 ===");
-    // 写入日志文件
-    try
-    {
-        File.AppendAllLines(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "scan_log.txt"), logLines);
-    }
-    catch { }
-
-    return deviceDict.Values.OrderByDescending(d => d.Rssi).ToList();
-}
 
         // ---------- 监控控制 ----------
         public async Task StartMonitoringAsync(string addressHexString)
