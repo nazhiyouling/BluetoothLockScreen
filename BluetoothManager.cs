@@ -40,7 +40,6 @@ namespace BluetoothLockScreen
         private static readonly string AppLogPath = Path.Combine(DataFolder, "app_log.txt");
         private static readonly Guid OurServiceUuid = Guid.Parse("0000ABCD-0000-1000-8000-00805F9B34FB");
 
-        // 设备固定识别码（来自手机扫描响应）
         private Guid _deviceGuid = Guid.Empty;
 
         public BluetoothManager(Action<string> status, Action<int> rssi, Action<string> name)
@@ -50,18 +49,17 @@ namespace BluetoothLockScreen
             _reconnectTimer = new Timer(ReconnectIntervalMs) { AutoReset = true };
             _reconnectTimer.Elapsed += OnReconnectTimer;
             Directory.CreateDirectory(DataFolder);
-            // 每次启动覆盖日志（记录启动时间）
             File.WriteAllText(AppLogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} 程序启动\n");
         }
 
-        private void Log(string message)
+        private void Log(string msg)
         {
-            string line = $"{DateTime.Now:HH:mm:ss.fff} {message}";
+            string line = $"{DateTime.Now:HH:mm:ss.fff} {msg}";
             try { File.AppendAllText(AppLogPath, line + Environment.NewLine); } catch { }
             System.Diagnostics.Debug.WriteLine(line);
         }
 
-        // ---------- 扫描设备列表（UI用） ----------
+        // ---------- UI 扫描 ----------
         public async Task<List<BluetoothDeviceInfo>> ScanDevicesAsync()
         {
             Log("开始UI扫描");
@@ -102,13 +100,12 @@ namespace BluetoothLockScreen
             return devices;
         }
 
-        // ---------- 监控启动 ----------
+        // ---------- 启动监控 ----------
         public async Task StartMonitoringAsync(string addressHex)
         {
             if (_isMonitoring) throw new InvalidOperationException("已在监控中");
             _deviceAddressStr = addressHex;
             Log($"启动监控，初始地址: {_deviceAddressStr}");
-            // 尝试加载已保存的设备 GUID
             if (!string.IsNullOrEmpty(ConfigManager.Default.DeviceGuid))
                 _deviceGuid = Guid.Parse(ConfigManager.Default.DeviceGuid);
             await ConnectAndExtractGuid();
@@ -157,12 +154,12 @@ namespace BluetoothLockScreen
             catch (Exception ex) { Log($"测试连接异常: {ex.Message}"); return null; }
         }
 
-        // ---------- 核心连接与重连 ----------
+        // ---------- 核心连接与 GUID 提取 ----------
         private async Task ConnectAndExtractGuid()
         {
             _discoveryWatcher?.Stop(); _discoveryWatcher = null;
 
-            // 尝试用当前地址连接
+            // 先尝试用已知地址连接
             if (!string.IsNullOrEmpty(_deviceAddressStr))
             {
                 try
@@ -177,13 +174,13 @@ namespace BluetoothLockScreen
                         await ExtractDeviceGuid(addr);
                         return;
                     }
-                    Log("已知地址连接失败");
+                    Log("已知地址连接失败，开始扫描GUID...");
                 }
                 catch (Exception ex) { Log($"连接异常: {ex.Message}"); }
             }
 
             // 扫描寻找设备（使用 GUID 或服务 UUID）
-            Log("开始发现扫描...");
+            Log("启动发现扫描...");
             var foundAddr = await DiscoverDeviceByUuidOrGuid();
             Log($"发现设备，新地址: {foundAddr:X12}");
             _deviceAddressStr = foundAddr.ToString("X12");
@@ -229,7 +226,7 @@ namespace BluetoothLockScreen
             }
             else
             {
-                Log("未能提取设备GUID，将使用服务UUID识别");
+                Log("未能提取设备GUID，将使用服务UUID作为备用");
             }
         }
 
@@ -313,18 +310,31 @@ namespace BluetoothLockScreen
             if (_isReconnecting || !_isMonitoring) return;
             try
             {
-                if (_device?.ConnectionStatus != BluetoothConnectionStatus.Connected)
+                bool needReconnect = _device == null || _device.ConnectionStatus != BluetoothConnectionStatus.Connected;
+                if (!needReconnect) return;
+
+                _isReconnecting = true;
+                Log("检测到连接丢失，开始自动重连...");
+                _updateStatus("重连中...");
+                Cleanup(); // 清理旧连接
+
+                // 连续尝试直到成功或监控停止
+                while (_isMonitoring)
                 {
-                    _isReconnecting = true;
-                    Log("检测到连接丢失，开始重连...");
-                    _updateStatus("重连中...");
-                    Cleanup();
-                    await ConnectAndExtractGuid();
-                    Log("重连成功");
-                    _updateStatus("已重连");
+                    try
+                    {
+                        await ConnectAndExtractGuid();
+                        Log("自动重连成功！");
+                        _updateStatus("已重连");
+                        break; // 成功退出循环
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"重连失败: {ex.Message}，5秒后重试...");
+                        await Task.Delay(5000);
+                    }
                 }
             }
-            catch (Exception ex) { Log($"重连失败: {ex.Message}"); }
             finally { _isReconnecting = false; }
         }
 
@@ -332,7 +342,7 @@ namespace BluetoothLockScreen
         {
             if (args.Status == GattSessionStatus.Closed)
             {
-                Log("GATT会话关闭，锁屏");
+                Log("GATT会话关闭，触发锁屏");
                 LockWorkStation();
                 _updateStatus("锁屏（断开）");
             }
