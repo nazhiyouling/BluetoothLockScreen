@@ -33,6 +33,7 @@ namespace BluetoothLockScreen
         private string _deviceAddressStr;
         private Timer _reconnectTimer;
         private bool _isReconnecting = false;
+        private bool _isAttemptingReconnect = false;   // 防止重入快速重连
         private const int ReconnectIntervalMs = 5000;
 
         private static readonly string DataFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data");
@@ -266,25 +267,96 @@ namespace BluetoothLockScreen
             StartRssiWatcher(addr);
         }
 
+        // ---------- RSSI 监听 (核心修改) ----------
         private void StartRssiWatcher(ulong addr)
         {
             _rssiWatcher?.Stop();
             _rssiWatcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
-            _rssiWatcher.Received += (s, e) =>
+            _rssiWatcher.Received += async (s, e) =>
             {
                 if (e.BluetoothAddress == addr)
                 {
                     _currentRssi = e.RawSignalStrengthInDBm;
                     _updateRssi(_currentRssi);
-                    if (_currentRssi < _rssiThreshold && _isMonitoring)
+
+                    // 当 RSSI 降到阈值以下，并且当前没有正在重连时
+                    if (_currentRssi < _rssiThreshold && _isMonitoring && !_isAttemptingReconnect)
                     {
-                        Log($"RSSI={_currentRssi} 低于阈值，锁屏");
-                        LockWorkStation();
-                        _updateStatus("锁屏（RSSI过低）");
+                        Log($"RSSI={_currentRssi} 低于阈值，开始快速重连尝试...");
+                        _isAttemptingReconnect = true;
+                        _updateStatus("信号丢失，尝试重连...");
+
+                        // 尝试快速扫描并重连
+                        bool reconnected = await TryQuickReconnect();
+                        if (!reconnected)
+                        {
+                            Log("快速重连失败，执行锁屏");
+                            LockWorkStation();
+                            _updateStatus("锁屏（信号丢失）");
+                            // 锁屏后，定时器会继续尝试自动重连（后台重连）
+                        }
+                        else
+                        {
+                            Log("快速重连成功，取消锁屏");
+                            _updateStatus("监控中...");
+                        }
+                        _isAttemptingReconnect = false;
                     }
                 }
             };
             _rssiWatcher.Start();
+        }
+
+        /// <summary>
+        /// 快速扫描并重连（扫描最多 10 秒），返回是否成功
+        /// </summary>
+        private async Task<bool> TryQuickReconnect()
+        {
+            try
+            {
+                // 清理当前连接，准备重新连接
+                Cleanup();
+                // 快速扫描：使用独立的发现扫描器，超时 10 秒
+                var tcs = new TaskCompletionSource<ulong>();
+                var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
+                watcher.Received += (s, e) =>
+                {
+                    if (_deviceGuid != Guid.Empty && e.Advertisement.ServiceUuids.Contains(_deviceGuid))
+                    {
+                        Log($"快速扫描 GUID 匹配: {e.BluetoothAddress:X12}");
+                        tcs.TrySetResult(e.BluetoothAddress);
+                    }
+                    else if (e.Advertisement.ServiceUuids.Contains(OurServiceUuid))
+                    {
+                        Log($"快速扫描 UUID 匹配: {e.BluetoothAddress:X12}");
+                        tcs.TrySetResult(e.BluetoothAddress);
+                    }
+                };
+                watcher.Start();
+                var completedTask = await Task.WhenAny(tcs.Task, Task.Delay(10000));
+                watcher.Stop();
+                if (completedTask == tcs.Task && tcs.Task.IsCompleted)
+                {
+                    ulong newAddr = tcs.Task.Result;
+                    Log($"快速重连获取新地址: {newAddr:X12}");
+                    _deviceAddressStr = newAddr.ToString("X12");
+                    ConfigManager.Default.DeviceAddress = _deviceAddressStr;
+                    ConfigManager.Save();
+                    _device = await BluetoothLEDevice.FromBluetoothAddressAsync(newAddr);
+                    if (_device != null)
+                    {
+                        await SetupConnection(_device, newAddr);
+                        await ExtractDeviceGuid(newAddr);
+                        return true;
+                    }
+                }
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Log($"快速重连异常: {ex.Message}");
+                return false;
+            }
         }
 
         private void Cleanup()
@@ -303,11 +375,14 @@ namespace BluetoothLockScreen
             if (_isReconnecting || !_isMonitoring) return;
             try
             {
+                // 如果当前处于快速重连中，跳过定时器重连
+                if (_isAttemptingReconnect) return;
+
                 bool needReconnect = _device == null || _device.ConnectionStatus != BluetoothConnectionStatus.Connected;
                 if (!needReconnect) return;
 
                 _isReconnecting = true;
-                Log("检测到连接丢失，开始自动重连...");
+                Log("定时器检测到连接丢失，开始后台重连...");
                 _updateStatus("重连中...");
                 Cleanup();
 
@@ -316,13 +391,13 @@ namespace BluetoothLockScreen
                     try
                     {
                         await ConnectAndExtractGuid();
-                        Log("自动重连成功！");
+                        Log("后台重连成功！");
                         _updateStatus("已重连");
                         break;
                     }
                     catch (Exception ex)
                     {
-                        Log($"重连失败: {ex.Message}，5秒后重试...");
+                        Log($"后台重连失败: {ex.Message}，5秒后重试...");
                         await Task.Delay(5000);
                     }
                 }
