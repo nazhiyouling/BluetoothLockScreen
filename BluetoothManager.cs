@@ -308,7 +308,7 @@ namespace BluetoothLockScreen
         }
 
         /// <summary>
-        /// 快速扫描并重连（扫描最多 10 秒），返回是否成功
+        /// 快速扫描并重连（扫描最多 3 秒），返回是否成功
         /// </summary>
         private async Task<bool> TryQuickReconnect()
         {
@@ -316,7 +316,7 @@ namespace BluetoothLockScreen
             {
                 // 清理当前连接，准备重新连接
                 Cleanup();
-                // 快速扫描：使用独立的发现扫描器，超时 10 秒
+                // 快速扫描：使用独立的发现扫描器，超时 3 秒
                 var tcs = new TaskCompletionSource<ulong>();
                 var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
                 watcher.Received += (s, e) =>
@@ -333,7 +333,7 @@ namespace BluetoothLockScreen
                     }
                 };
                 watcher.Start();
-                var completedTask = await Task.WhenAny(tcs.Task, Task.Delay(10000));
+                var completedTask = await Task.WhenAny(tcs.Task, Task.Delay(3000));
                 watcher.Stop();
                 if (completedTask == tcs.Task && tcs.Task.IsCompleted)
                 {
