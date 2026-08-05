@@ -5,6 +5,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Timers;
+using Microsoft.Win32;                       // 用于 SessionSwitch 事件
 using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.Advertisement;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
@@ -42,6 +43,7 @@ namespace BluetoothLockScreen
         private static readonly Guid OurServiceUuid = Guid.Parse("0000ABCD-0000-1000-8000-00805F9B34FB");
 
         private Guid _deviceGuid = Guid.Empty;
+        private bool _isScreenLocked = false;  // 是否处于锁屏状态
 
         public BluetoothManager(Action<string> status, Action<int> rssi, Action<string> name)
         {
@@ -51,6 +53,9 @@ namespace BluetoothLockScreen
             _reconnectTimer.Elapsed += OnReconnectTimer;
             Directory.CreateDirectory(DataFolder);
             File.WriteAllText(AppLogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} 程序启动\n");
+
+            // 订阅系统锁定/解锁事件
+            SystemEvents.SessionSwitch += OnSessionSwitch;
         }
 
         private void Log(string msg)
@@ -279,7 +284,7 @@ namespace BluetoothLockScreen
                     _currentRssi = e.RawSignalStrengthInDBm;
                     _updateRssi(_currentRssi);
 
-                    if (_currentRssi < _rssiThreshold && _isMonitoring && !_isAttemptingReconnect)
+                    if (_currentRssi < _rssiThreshold && _isMonitoring && !_isAttemptingReconnect && !_isScreenLocked)
                     {
                         Log($"RSSI={_currentRssi} 低于阈值，开始快速重连...");
                         _isAttemptingReconnect = true;
@@ -291,7 +296,7 @@ namespace BluetoothLockScreen
                             Log("快速重连失败，执行锁屏");
                             LockWorkStation();
                             _updateStatus("锁屏（信号丢失）");
-                            // 锁屏后保持 _isMonitoring = true，定时器会继续后台重连
+                            // 锁屏后由 SessionSwitch 事件处理，定时器暂停
                         }
                         else
                         {
@@ -306,7 +311,7 @@ namespace BluetoothLockScreen
         }
 
         /// <summary>
-        /// 快速重连：扫描 3 秒，若获取新地址并完整建立连接（GATT、RSSI监听）则返回 true
+        /// 快速重连：扫描 3 秒，完整建立连接（GATT、RSSI监听），并等待 2 秒确认连接稳定
         /// </summary>
         private async Task<bool> TryQuickReconnect()
         {
@@ -347,8 +352,20 @@ namespace BluetoothLockScreen
                 _session.SessionStatusChanged += OnSessionClosed;
                 _updateDeviceName(newDevice.Name);
                 StartRssiWatcher(newAddr);
-                Log("快速重连完整建立，监控恢复");
-                return true;
+
+                // 等待 2 秒确认连接稳定
+                await Task.Delay(2000);
+                if (_device?.ConnectionStatus == BluetoothConnectionStatus.Connected)
+                {
+                    Log("快速重连成功且连接稳定");
+                    return true;
+                }
+                else
+                {
+                    Log("快速重连后连接不稳定，断开");
+                    Cleanup();
+                    return false;
+                }
             }
             catch (Exception ex)
             {
@@ -365,12 +382,70 @@ namespace BluetoothLockScreen
             _device?.Dispose(); _device = null;
         }
 
-        private void StartReconnectTimer() => _reconnectTimer.Start();
-        private void StopReconnectTimer() => _reconnectTimer.Stop();
+        // ---------- 系统锁定/解锁事件 ----------
+        private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
+        {
+            if (e.Reason == SessionSwitchReason.SessionLock)
+            {
+                Log("检测到系统锁定，暂停后台重连");
+                _isScreenLocked = true;
+                StopReconnectTimer();
+            }
+            else if (e.Reason == SessionSwitchReason.SessionUnlock)
+            {
+                Log("检测到系统解锁，启动扫描重连...");
+                _isScreenLocked = false;
+                if (_isMonitoring)
+                {
+                    StartReconnectTimer();  // 重新启动定时器
+                    // 立即执行一次重连尝试
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await ScanAndReconnectAfterUnlock();
+                        }
+                        catch { }
+                    });
+                }
+            }
+        }
+
+        private async Task ScanAndReconnectAfterUnlock()
+        {
+            if (_isReconnecting || !_isMonitoring) return;
+            try
+            {
+                _isReconnecting = true;
+                Log("解锁后主动扫描重连...");
+                _updateStatus("重连中...");
+                Cleanup();
+                await ConnectAndExtractGuid();
+                Log("解锁后重连成功");
+                _updateStatus("已重连");
+            }
+            catch (Exception ex)
+            {
+                Log($"解锁后重连失败: {ex.Message}，等待定时器重试...");
+                _updateStatus("重连中...");
+            }
+            finally { _isReconnecting = false; }
+        }
+
+        private void StartReconnectTimer()
+        {
+            if (!_isScreenLocked)
+                _reconnectTimer.Start();
+        }
+
+        private void StopReconnectTimer()
+        {
+            _reconnectTimer.Stop();
+        }
 
         private async void OnReconnectTimer(object sender, ElapsedEventArgs e)
         {
-            if (_isReconnecting || !_isMonitoring || _isAttemptingReconnect) return;
+            if (_isReconnecting || !_isMonitoring || _isAttemptingReconnect || _isScreenLocked) return;
             try
             {
                 if (_device?.ConnectionStatus != BluetoothConnectionStatus.Connected)
@@ -380,20 +455,30 @@ namespace BluetoothLockScreen
                     _updateStatus("重连中...");
                     Cleanup();
 
-                    while (_isMonitoring)
+                    while (_isMonitoring && !_isScreenLocked)
                     {
                         try
                         {
                             await ConnectAndExtractGuid();
-                            Log("后台重连成功！");
-                            _updateStatus("已重连");
-                            break;
+                            // 验证连接稳定
+                            await Task.Delay(2000);
+                            if (_device?.ConnectionStatus == BluetoothConnectionStatus.Connected)
+                            {
+                                Log("后台重连成功且连接稳定");
+                                _updateStatus("已重连");
+                                break;
+                            }
+                            else
+                            {
+                                Log("后台重连后连接不稳定，稍后重试...");
+                                Cleanup();
+                            }
                         }
                         catch (Exception ex)
                         {
                             Log($"后台重连失败: {ex.Message}，5秒后重试...");
-                            await Task.Delay(5000);
                         }
+                        await Task.Delay(5000);
                     }
                 }
             }
@@ -405,8 +490,11 @@ namespace BluetoothLockScreen
             if (args.Status == GattSessionStatus.Closed)
             {
                 Log("GATT会话关闭，触发锁屏");
-                LockWorkStation();
-                _updateStatus("锁屏（断开）");
+                if (!_isScreenLocked)
+                {
+                    LockWorkStation();
+                    _updateStatus("锁屏（断开）");
+                }
             }
         }
 
@@ -418,6 +506,7 @@ namespace BluetoothLockScreen
         public void Dispose()
         {
             StopMonitoring();
+            SystemEvents.SessionSwitch -= OnSessionSwitch;
             _reconnectTimer?.Dispose();
         }
     }
