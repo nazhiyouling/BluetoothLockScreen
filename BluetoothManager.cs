@@ -25,7 +25,7 @@ namespace BluetoothLockScreen
         private BluetoothLEDevice _device;
         private GattSession _session;
         private BluetoothLEAdvertisementWatcher _rssiWatcher;
-        private BluetoothLEAdvertisementWatcher _discoveryWatcher;
+        private BluetoothLEAdvertisementWatcher _unlockScanWatcher;   // 解锁专用扫描器
         private int _rssiThreshold;
         private int _currentRssi = int.MinValue;
         private List<int> _rssiLog = new List<int>();
@@ -35,7 +35,7 @@ namespace BluetoothLockScreen
         private Timer _reconnectTimer;
         private bool _isReconnecting = false;
         private bool _isAttemptingReconnect = false;
-        private const int ReconnectIntervalMs = 2000;    // 缩短为 2 秒
+        private const int ReconnectIntervalMs = 2000;      // 2 秒
 
         private static readonly string DataFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data");
         private static readonly string RssiLogPath = Path.Combine(DataFolder, "rssi_log.txt");
@@ -95,7 +95,16 @@ namespace BluetoothLockScreen
             return devices;
         }
 
-        public async Task<List<BluetoothDeviceInfo>> GetPairedDevicesAsync() { /* 略 */ return new List<BluetoothDeviceInfo>(); }
+        public async Task<List<BluetoothDeviceInfo>> GetPairedDevicesAsync()
+        {
+            var devices = new List<BluetoothDeviceInfo>();
+            var selector = BluetoothDevice.GetDeviceSelectorFromPairingState(true);
+            var infos = await DeviceInformation.FindAllAsync(selector);
+            foreach (var info in infos)
+                if (info.Properties.TryGetValue("System.Devices.Aep.DeviceAddress", out object prop))
+                    devices.Add(new BluetoothDeviceInfo { Address = Convert.ToUInt64(prop.ToString().Replace(":", ""), 16), DisplayName = $"{info.Name} ({prop})" });
+            return devices;
+        }
 
         // ---------- 自动连接 ----------
         public async Task AutoConnectAndMonitorAsync()
@@ -299,12 +308,12 @@ namespace BluetoothLockScreen
         private void Cleanup()
         {
             _rssiWatcher?.Stop(); _rssiWatcher = null;
-            _discoveryWatcher?.Stop(); _discoveryWatcher = null;
+            _unlockScanWatcher?.Stop(); _unlockScanWatcher = null;
             if (_session != null) { _session.SessionStatusChanged -= OnSessionClosed; _session.MaintainConnection = false; _session.Dispose(); _session = null; }
             _device?.Dispose(); _device = null;
         }
 
-        // ---------- 锁定/解锁事件 ----------
+        // ---------- 系统锁定/解锁事件（优化版） ----------
         private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
         {
             if (e.Reason == SessionSwitchReason.SessionLock)
@@ -315,60 +324,101 @@ namespace BluetoothLockScreen
             }
             else if (e.Reason == SessionSwitchReason.SessionUnlock)
             {
-                Log("系统解锁，启动扫描重连...");
+                Log("系统解锁，启动立即扫描...");
                 _isScreenLocked = false;
                 if (_isMonitoring)
                 {
-                    StartReconnectTimer();
-                    _ = Task.Run(async () => await UnlockReconnect());
+                    StartReconnectTimer();      // 开启定时器作为后备
+                    // 立即启动高优先级解锁扫描
+                    _ = Task.Run(async () => await UnlockImmediateScan());
                 }
             }
         }
 
-        private async Task UnlockReconnect()
+        /// <summary>
+        /// 解锁后立即扫描 3 秒，发现目标设备直接连接
+        /// </summary>
+        private async Task UnlockImmediateScan()
         {
-            if (_isReconnecting || !_isMonitoring) return;
-            _isReconnecting = true;
-            _updateStatus("重连中...");
-            Cleanup();
-            try
+            if (_isReconnecting || !_isMonitoring)
             {
-                // 最多尝试 30 秒，快速找到设备
-                var tcs = new TaskCompletionSource<ulong>();
-                var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
-                watcher.Received += (s, e) =>
-                {
-                    if (_deviceGuid != Guid.Empty && e.Advertisement.ServiceUuids.Contains(_deviceGuid))
-                        tcs.TrySetResult(e.BluetoothAddress);
-                    else if (e.Advertisement.ServiceUuids.Contains(OurServiceUuid))
-                        tcs.TrySetResult(e.BluetoothAddress);
-                };
-                watcher.Start();
-                var completed = await Task.WhenAny(tcs.Task, Task.Delay(30000));
-                watcher.Stop();
+                Log("解锁扫描被阻塞: _isReconnecting=" + _isReconnecting + " _isMonitoring=" + _isMonitoring);
+                return;
+            }
 
-                if (completed == tcs.Task)
+            _isReconnecting = true;    // 占位，避免其他重入
+            Log("解锁扫描：启动高优先级扫描器（3 秒超时）");
+            _updateStatus("重连中...");
+
+            // 停止之前可能残留的扫描器
+            _unlockScanWatcher?.Stop();
+            _unlockScanWatcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
+
+            var tcs = new TaskCompletionSource<ulong>();
+            _unlockScanWatcher.Received += (s, e) =>
+            {
+                if (_deviceGuid != Guid.Empty && e.Advertisement.ServiceUuids.Contains(_deviceGuid))
                 {
-                    ulong addr = tcs.Task.Result;
-                    Log($"解锁扫描找到设备: {addr:X12}");
-                    _deviceAddressStr = addr.ToString("X12");
-                    ConfigManager.Default.DeviceAddress = _deviceAddressStr;
-                    ConfigManager.Save();
-                    _device = await BluetoothLEDevice.FromBluetoothAddressAsync(addr);
-                    if (_device != null)
+                    Log("解锁扫描：GUID 匹配，地址=" + e.BluetoothAddress.ToString("X12"));
+                    tcs.TrySetResult(e.BluetoothAddress);
+                }
+                else if (e.Advertisement.ServiceUuids.Contains(OurServiceUuid))
+                {
+                    Log("解锁扫描：UUID 匹配，地址=" + e.BluetoothAddress.ToString("X12"));
+                    tcs.TrySetResult(e.BluetoothAddress);
+                }
+            };
+            _unlockScanWatcher.Stopped += (s, e) =>
+            {
+                if (!tcs.Task.IsCompleted)
+                {
+                    Log("解锁扫描：扫描器意外停止，但未找到设备，继续等待...");
+                    _unlockScanWatcher.Start();
+                }
+            };
+            _unlockScanWatcher.Start();
+
+            var completed = await Task.WhenAny(tcs.Task, Task.Delay(3000)); // 3 秒超时
+            _unlockScanWatcher.Stop();
+            _unlockScanWatcher = null;
+
+            if (completed == tcs.Task)
+            {
+                ulong newAddr = tcs.Task.Result;
+                Log("解锁扫描成功，找到设备，尝试连接...");
+                try
+                {
+                    Cleanup();  // 清除旧连接
+                    var dev = await BluetoothLEDevice.FromBluetoothAddressAsync(newAddr);
+                    if (dev != null)
                     {
-                        await SetupConnection(_device, addr);
-                        await ExtractDeviceGuid(addr);
-                        Log("解锁重连成功");
+                        await SetupConnection(dev, newAddr);
+                        await ExtractDeviceGuid(newAddr);
+                        _deviceAddressStr = newAddr.ToString("X12");
+                        ConfigManager.Default.DeviceAddress = _deviceAddressStr;
+                        ConfigManager.Save();
+                        Log("解锁重连完成，监控已恢复");
                         _updateStatus("已重连");
-                        return;
+                    }
+                    else
+                    {
+                        Log("解锁扫描：无法从地址创建设备对象");
+                        _updateStatus("重连中...");
                     }
                 }
-                Log("解锁扫描超时，交给定时器继续重连");
+                catch (Exception ex)
+                {
+                    Log("解锁扫描连接失败: " + ex.Message);
+                    _updateStatus("重连中...");
+                }
+            }
+            else
+            {
+                Log("解锁扫描超时（3 秒），未找到目标设备，交由定时器继续尝试");
                 _updateStatus("重连中...");
             }
-            catch (Exception ex) { Log($"解锁重连异常: {ex.Message}"); }
-            finally { _isReconnecting = false; }
+
+            _isReconnecting = false;
         }
 
         private void StartReconnectTimer() { if (!_isScreenLocked) _reconnectTimer.Start(); }
@@ -376,10 +426,21 @@ namespace BluetoothLockScreen
 
         private async void OnReconnectTimer(object sender, ElapsedEventArgs e)
         {
-            if (_isReconnecting || !_isMonitoring || _isAttemptingReconnect || _isScreenLocked) return;
-            if (_device?.ConnectionStatus == BluetoothConnectionStatus.Connected) return;
+            // 不阻塞在锁屏状态
+            if (_isReconnecting || !_isMonitoring || _isAttemptingReconnect)
+            {
+                if (_isReconnecting) Log("定时器跳过：_isReconnecting=true");
+                if (_isAttemptingReconnect) Log("定时器跳过：_isAttemptingReconnect=true");
+                return;
+            }
+
+            if (_device?.ConnectionStatus == BluetoothConnectionStatus.Connected)
+            {
+                return;
+            }
+
             _isReconnecting = true;
-            Log("定时器重连...");
+            Log("定时器重连：开始尝试...");
             _updateStatus("重连中...");
             Cleanup();
             try
@@ -391,7 +452,11 @@ namespace BluetoothLockScreen
                     Log("定时器重连成功");
                     _updateStatus("已重连");
                 }
-                else throw new Exception("不稳定");
+                else
+                {
+                    Log("定时器重连后连接不稳定，清理重新等待");
+                    Cleanup();
+                }
             }
             catch (Exception ex)
             {
@@ -406,7 +471,11 @@ namespace BluetoothLockScreen
             if (args.Status == GattSessionStatus.Closed)
             {
                 Log("GATT会话关闭，锁屏");
-                if (!_isScreenLocked) { LockWorkStation(); _updateStatus("锁屏（断开）"); }
+                if (!_isScreenLocked)
+                {
+                    LockWorkStation();
+                    _updateStatus("锁屏（断开）");
+                }
             }
         }
 
