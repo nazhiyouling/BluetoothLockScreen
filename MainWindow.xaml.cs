@@ -19,16 +19,39 @@ namespace BluetoothLockScreen
         public MainWindow()
         {
             InitializeComponent();
-            // 动态版本号
+
+            // 动态版本号（标题显示如 V2026.08.05.003）
             var ver = Assembly.GetExecutingAssembly().GetName().Version;
-            Title = $"蓝牙锁屏监控 V{ver.Major}.{ver.Minor:D2}.{ver.Build:D2}" + (ver.Revision > 0 ? $".{ver.Revision:D4}" : "");
+            Title = $"蓝牙锁屏监控 V{ver.Major}.{ver.Minor:D2}.{ver.Build:D2}" +
+                    (ver.Revision > 0 ? $".{ver.Revision:D4}" : "");
 
             _btManager = new BluetoothManager(
                 s => Dispatcher.Invoke(() => StatusText.Text = s),
                 r => Dispatcher.Invoke(() => RssiText.Text = $"RSSI: {r} dBm"),
                 n => Dispatcher.Invoke(() => DeviceNameText.Text = n));
 
-            Loaded += (_, _) => { Activate(); Topmost = true; Topmost = false; };
+            Loaded += async (_, _) =>
+            {
+                Activate();
+                Topmost = true;
+                Topmost = false;
+
+                // 启动软件时自动扫描并连接 BLE-Anchor
+                try
+                {
+                    await _btManager.AutoConnectAndMonitorAsync();
+                    _isMonitoring = true;
+                    StartStopButton.Content = "⏹\n停止监控";
+                    StartStopButton.Background = new SolidColorBrush(Colors.IndianRed);
+                    StartStopButton.Foreground = new SolidColorBrush(Colors.White);
+                }
+                catch (Exception ex)
+                {
+                    System.Windows.MessageBox.Show($"自动连接失败：{ex.Message}\n您可以稍后手动开始监控。",
+                        "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+            };
+
             InitTray();
         }
 
@@ -37,7 +60,8 @@ namespace BluetoothLockScreen
             try
             {
                 Icon icon;
-                var streamInfo = System.Windows.Application.GetResourceStream(new Uri("Resources/app.ico", UriKind.Relative));
+                var streamInfo = System.Windows.Application.GetResourceStream(
+                    new Uri("Resources/app.ico", UriKind.Relative));
                 if (streamInfo != null)
                 {
                     using (var s = streamInfo.Stream) icon = new Icon(s);
@@ -48,12 +72,34 @@ namespace BluetoothLockScreen
                 }
                 else icon = System.Drawing.SystemIcons.Application;
 
-                _notifyIcon = new NotifyIcon { Icon = icon, Visible = false, Text = "蓝牙锁屏监控" };
+                _notifyIcon = new NotifyIcon
+                {
+                    Icon = icon,
+                    Visible = false,
+                    Text = "蓝牙锁屏监控"
+                };
+
                 var menu = new ContextMenuStrip();
-                menu.Items.Add("显示窗口", null, (_, _) => { Show(); Activate(); WindowState = WindowState.Normal; _notifyIcon.Visible = false; });
-                menu.Items.Add("退出程序", null, (_, _) => { _forceExit = true; Close(); });
+                menu.Items.Add("显示窗口", null, (_, _) =>
+                {
+                    Show();
+                    Activate();
+                    WindowState = WindowState.Normal;
+                    _notifyIcon.Visible = false;
+                });
+                menu.Items.Add("退出程序", null, (_, _) =>
+                {
+                    _forceExit = true;
+                    Close();
+                });
                 _notifyIcon.ContextMenuStrip = menu;
-                _notifyIcon.MouseDoubleClick += (_, _) => { Show(); Activate(); WindowState = WindowState.Normal; _notifyIcon.Visible = false; };
+                _notifyIcon.MouseDoubleClick += (_, _) =>
+                {
+                    Show();
+                    Activate();
+                    WindowState = WindowState.Normal;
+                    _notifyIcon.Visible = false;
+                };
             }
             catch { _notifyIcon = null; }
         }
@@ -78,15 +124,15 @@ namespace BluetoothLockScreen
         {
             if (!_isMonitoring)
             {
-                var addr = ConfigManager.Default.DeviceAddress;
-                if (string.IsNullOrWhiteSpace(addr))
-                {
-                    System.Windows.MessageBox.Show("请先在设置中配置蓝牙设备。");
-                    return;
-                }
+                // 手动开始监控：如果有保存的地址则尝试连接，否则自动扫描
+                string addr = ConfigManager.Default.DeviceAddress;
                 try
                 {
-                    await _btManager.StartMonitoringAsync(addr);
+                    if (!string.IsNullOrWhiteSpace(addr))
+                        await _btManager.StartMonitoringAsync(addr);
+                    else
+                        await _btManager.AutoConnectAndMonitorAsync();
+
                     _isMonitoring = true;
                     StartStopButton.Content = "⏹\n停止监控";
                     StartStopButton.Background = new SolidColorBrush(Colors.IndianRed);
@@ -94,7 +140,7 @@ namespace BluetoothLockScreen
                 }
                 catch (Exception ex)
                 {
-                    System.Windows.MessageBox.Show($"启动失败：{ex.Message}");
+                    System.Windows.MessageBox.Show($"启动监控失败：{ex.Message}");
                 }
             }
             else
@@ -104,7 +150,8 @@ namespace BluetoothLockScreen
                 StartStopButton.Content = "▶\n开始监控";
                 StartStopButton.Background = new SolidColorBrush(Colors.LightGreen);
                 StartStopButton.Foreground = new SolidColorBrush(Colors.Black);
-                StatusText.Text = "未开始监控"; RssiText.Text = "RSSI: --";
+                StatusText.Text = "未开始监控";
+                RssiText.Text = "RSSI: --";
             }
         }
 
