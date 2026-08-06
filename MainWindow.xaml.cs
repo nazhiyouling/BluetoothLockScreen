@@ -15,12 +15,13 @@ namespace BluetoothLockScreen
         private bool _isMonitoring = false;
         private NotifyIcon _notifyIcon;
         private bool _forceExit = false;
+        private bool _isAutoStarting = true;   // 标记是否为自动启动（首次加载）
 
         public MainWindow()
         {
             InitializeComponent();
 
-            // 动态版本号（标题显示如 V2026.08.05.003）
+            // 动态版本号
             var ver = Assembly.GetExecutingAssembly().GetName().Version;
             Title = $"蓝牙锁屏监控 V{ver.Major}.{ver.Minor:D2}.{ver.Build:D2}" +
                     (ver.Revision > 0 ? $".{ver.Revision:D4}" : "");
@@ -30,13 +31,15 @@ namespace BluetoothLockScreen
                 r => Dispatcher.Invoke(() => RssiText.Text = $"RSSI: {r} dBm"),
                 n => Dispatcher.Invoke(() => DeviceNameText.Text = n));
 
+            InitTray();
+
             Loaded += async (_, _) =>
             {
                 Activate();
                 Topmost = true;
                 Topmost = false;
 
-                // 启动软件时自动扫描并连接 BLE-Anchor
+                // 启动时自动扫描并连接 BLE-Anchor，静默处理异常
                 try
                 {
                     await _btManager.AutoConnectAndMonitorAsync();
@@ -47,12 +50,20 @@ namespace BluetoothLockScreen
                 }
                 catch (Exception ex)
                 {
-                    System.Windows.MessageBox.Show($"自动连接失败：{ex.Message}\n您可以稍后手动开始监控。",
-                        "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+                    System.Diagnostics.Debug.WriteLine("自动连接失败: " + ex.Message);
+                    // 不弹窗，仅记录日志
+                }
+                finally
+                {
+                    // 无论连接是否成功，都隐藏窗口并显示托盘图标（仅自动启动时）
+                    if (_isAutoStarting && _notifyIcon != null)
+                    {
+                        Hide();
+                        _notifyIcon.Visible = true;
+                        _isAutoStarting = false;  // 后续手动操作不再自动隐藏
+                    }
                 }
             };
-
-            InitTray();
         }
 
         private void InitTray()
@@ -124,7 +135,7 @@ namespace BluetoothLockScreen
         {
             if (!_isMonitoring)
             {
-                // 手动开始监控：如果有保存的地址则尝试连接，否则自动扫描
+                // 手动开始监控：尝试使用已保存地址或自动扫描
                 string addr = ConfigManager.Default.DeviceAddress;
                 try
                 {
