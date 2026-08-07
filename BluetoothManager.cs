@@ -34,7 +34,7 @@ namespace BluetoothLockScreen
         private string _deviceAddressStr;
         private Timer _reconnectTimer;
         private bool _isReconnecting = false;
-        private bool _isQuickScanning = false;        // 正在执行快速扫描（RSSI触发）
+        private bool _isQuickScanning = false;
         private const int ReconnectIntervalMs = 2000;
 
         private static readonly string DataFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data");
@@ -203,7 +203,7 @@ namespace BluetoothLockScreen
             StartRssiWatcher(addr);
         }
 
-        // ---------- RSSI 监听（新增快速扫描锁屏保护） ----------
+        // ---------- RSSI 监听（快速扫描防误锁） ----------
         private void StartRssiWatcher(ulong addr)
         {
             _rssiWatcher?.Stop();
@@ -215,10 +215,9 @@ namespace BluetoothLockScreen
                     _currentRssi = e.RawSignalStrengthInDBm;
                     _updateRssi(_currentRssi);
 
-                    // 低于阈值且未锁屏、未在快速扫描中
                     if (_currentRssi < _rssiThreshold && _isMonitoring && !_isScreenLocked && !_isQuickScanning)
                     {
-                        Log($"RSSI={_currentRssi} 低于阈值，执行快速扫描...");
+                        Log($"RSSI={_currentRssi} 低于阈值，开始快速扫描...");
                         _isQuickScanning = true;
                         _updateStatus("信号弱，确认设备...");
 
@@ -231,7 +230,7 @@ namespace BluetoothLockScreen
                         }
                         else
                         {
-                            Log("快速扫描成功，已更新连接，取消锁屏");
+                            Log("快速扫描成功，已更新连接");
                             _updateStatus("监控中...");
                         }
                         _isQuickScanning = false;
@@ -242,26 +241,25 @@ namespace BluetoothLockScreen
         }
 
         /// <summary>
-        /// 快速扫描 2 秒，尝试找到目标设备并重新建立连接
+        /// 快速扫描 2 秒，找到目标设备后重建连接。返回是否成功。
         /// </summary>
         private async Task<bool> QuickScanAndReconnect()
         {
-            Cleanup();  // 停止当前监听和会话，释放扫描器
+            Cleanup();
             var tcs = new TaskCompletionSource<ulong>();
-            using (var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active })
+            var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
+            watcher.Received += (s, e) =>
             {
-                watcher.Received += (s, e) =>
-                {
-                    if (_deviceGuid != Guid.Empty && e.Advertisement.ServiceUuids.Contains(_deviceGuid))
-                        tcs.TrySetResult(e.BluetoothAddress);
-                    else if (e.Advertisement.ServiceUuids.Contains(OurServiceUuid))
-                        tcs.TrySetResult(e.BluetoothAddress);
-                };
-                watcher.Start();
-                var completed = await Task.WhenAny(tcs.Task, Task.Delay(2000));
-                watcher.Stop();
-                if (completed != tcs.Task) return false;
-            }
+                if (_deviceGuid != Guid.Empty && e.Advertisement.ServiceUuids.Contains(_deviceGuid))
+                    tcs.TrySetResult(e.BluetoothAddress);
+                else if (e.Advertisement.ServiceUuids.Contains(OurServiceUuid))
+                    tcs.TrySetResult(e.BluetoothAddress);
+            };
+            watcher.Start();
+            var completed = await Task.WhenAny(tcs.Task, Task.Delay(2000));
+            watcher.Stop();
+
+            if (completed != tcs.Task) return false;
 
             ulong addr = tcs.Task.Result;
             Log($"快速扫描发现设备: {addr:X12}");
