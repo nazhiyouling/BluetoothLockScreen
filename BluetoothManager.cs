@@ -46,9 +46,6 @@ namespace BluetoothLockScreen
         private bool _isScreenLocked = false;
         private DateTime _lastLockTime = DateTime.MinValue;
 
-        // 新：记录最近一次成功重连后的会话ID，用于过滤旧会话关闭事件
-        private string _lastSessionId = null;
-
         public BluetoothManager(Action<string> status, Action<int> rssi, Action<string> name)
         {
             _updateStatus = status; _updateRssi = rssi; _updateDeviceName = name;
@@ -235,8 +232,6 @@ namespace BluetoothLockScreen
             _session = await GattSession.FromDeviceIdAsync(dev.BluetoothDeviceId)
                 ?? throw new Exception("无法创建GATT会话");
             _session.MaintainConnection = true;
-            // 记录当前会话的标识（用设备ID简单代表）
-            _lastSessionId = dev.BluetoothDeviceId;
             _session.SessionStatusChanged += OnSessionClosed;
             StartRssiWatcher(addr);
         }
@@ -317,7 +312,6 @@ namespace BluetoothLockScreen
                 ConfigManager.Save();
                 _device = dev;
                 _session = sess;
-                _lastSessionId = dev.BluetoothDeviceId;
                 _session.MaintainConnection = true;
                 _session.SessionStatusChanged += OnSessionClosed;
                 _updateDeviceName(dev.Name);
@@ -355,7 +349,6 @@ namespace BluetoothLockScreen
                 _session = null;
             }
             _device?.Dispose(); _device = null;
-            _lastSessionId = null;
         }
 
         // ---------- 系统锁定/解锁事件 ----------
@@ -480,22 +473,29 @@ namespace BluetoothLockScreen
             finally { _isReconnecting = false; }
         }
 
-        // 改进的 GATT 关闭事件处理：忽略旧会话和快速重连成功后的短时关闭
+        // GATT 会话关闭事件处理：忽略旧会话和重连过程中的短暂关闭
         private void OnSessionClosed(GattSession sender, GattSessionStatusChangedEventArgs args)
         {
             if (args.Status != GattSessionStatus.Closed) return;
 
-            // 如果 sender 不是当前会话，说明是旧会话残留，忽略
+            // 如果 sender 不是当前活动的会话，忽略（旧连接残留）
             if (_session != null && sender != _session)
             {
                 Log("忽略旧会话关闭事件");
                 return;
             }
 
-            // 如果在快速重连中或刚刚重连成功（2 秒内），暂不锁屏
-            if (_isAttemptingReconnect || _isReconnecting || (_lastSessionId != null && (DateTime.Now - _lastLockTime).TotalSeconds < 2))
+            // 如果在快速重连或定时器重连过程中，忽略关闭事件，避免误锁屏
+            if (_isAttemptingReconnect || _isReconnecting)
             {
-                Log("GATT关闭事件忽略（正在重连或刚重连）");
+                Log("GATT关闭事件忽略（正在重连中）");
+                return;
+            }
+
+            // 短时间内重复的关闭事件忽略（防抖）
+            if ((DateTime.Now - _lastLockTime).TotalSeconds < 2)
+            {
+                Log("GATT关闭事件忽略（重复）");
                 return;
             }
 
