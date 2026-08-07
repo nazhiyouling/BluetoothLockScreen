@@ -34,6 +34,7 @@ namespace BluetoothLockScreen
         private string _deviceAddressStr;
         private Timer _reconnectTimer;
         private bool _isReconnecting = false;
+        private bool _isQuickScanning = false;        // 正在执行快速扫描（RSSI触发）
         private const int ReconnectIntervalMs = 2000;
 
         private static readonly string DataFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data");
@@ -202,26 +203,91 @@ namespace BluetoothLockScreen
             StartRssiWatcher(addr);
         }
 
-        // ---------- RSSI 监听 ----------
+        // ---------- RSSI 监听（新增快速扫描锁屏保护） ----------
         private void StartRssiWatcher(ulong addr)
         {
             _rssiWatcher?.Stop();
             _rssiWatcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
-            _rssiWatcher.Received += (s, e) =>
+            _rssiWatcher.Received += async (s, e) =>
             {
                 if (e.BluetoothAddress == addr)
                 {
                     _currentRssi = e.RawSignalStrengthInDBm;
                     _updateRssi(_currentRssi);
-                    if (_currentRssi < _rssiThreshold && _isMonitoring && !_isScreenLocked)
+
+                    // 低于阈值且未锁屏、未在快速扫描中
+                    if (_currentRssi < _rssiThreshold && _isMonitoring && !_isScreenLocked && !_isQuickScanning)
                     {
-                        Log($"RSSI={_currentRssi} 低于阈值，锁屏");
-                        LockWorkStation();
-                        _updateStatus("锁屏（信号丢失）");
+                        Log($"RSSI={_currentRssi} 低于阈值，执行快速扫描...");
+                        _isQuickScanning = true;
+                        _updateStatus("信号弱，确认设备...");
+
+                        bool deviceFound = await QuickScanAndReconnect();
+                        if (!deviceFound)
+                        {
+                            Log("快速扫描未发现设备，执行锁屏");
+                            LockWorkStation();
+                            _updateStatus("锁屏（信号丢失）");
+                        }
+                        else
+                        {
+                            Log("快速扫描成功，已更新连接，取消锁屏");
+                            _updateStatus("监控中...");
+                        }
+                        _isQuickScanning = false;
                     }
                 }
             };
             _rssiWatcher.Start();
+        }
+
+        /// <summary>
+        /// 快速扫描 2 秒，尝试找到目标设备并重新建立连接
+        /// </summary>
+        private async Task<bool> QuickScanAndReconnect()
+        {
+            Cleanup();  // 停止当前监听和会话，释放扫描器
+            var tcs = new TaskCompletionSource<ulong>();
+            using (var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active })
+            {
+                watcher.Received += (s, e) =>
+                {
+                    if (_deviceGuid != Guid.Empty && e.Advertisement.ServiceUuids.Contains(_deviceGuid))
+                        tcs.TrySetResult(e.BluetoothAddress);
+                    else if (e.Advertisement.ServiceUuids.Contains(OurServiceUuid))
+                        tcs.TrySetResult(e.BluetoothAddress);
+                };
+                watcher.Start();
+                var completed = await Task.WhenAny(tcs.Task, Task.Delay(2000));
+                watcher.Stop();
+                if (completed != tcs.Task) return false;
+            }
+
+            ulong addr = tcs.Task.Result;
+            Log($"快速扫描发现设备: {addr:X12}");
+            try
+            {
+                var dev = await BluetoothLEDevice.FromBluetoothAddressAsync(addr);
+                if (dev == null) return false;
+                var sess = await GattSession.FromDeviceIdAsync(dev.BluetoothDeviceId);
+                if (sess == null) { dev.Dispose(); return false; }
+
+                _deviceAddressStr = addr.ToString("X12");
+                ConfigManager.Default.DeviceAddress = _deviceAddressStr;
+                ConfigManager.Save();
+                _device = dev;
+                _session = sess;
+                _session.MaintainConnection = true;
+                _session.SessionStatusChanged += OnSessionClosed;
+                _updateDeviceName(dev.Name);
+                StartRssiWatcher(addr);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log($"快速扫描连接失败: {ex.Message}");
+                return false;
+            }
         }
 
         private void Cleanup()
@@ -253,7 +319,6 @@ namespace BluetoothLockScreen
                 _isScreenLocked = false;
                 if (_isMonitoring)
                 {
-                    // 立即执行一次重连，不依赖定时器
                     _ = Task.Run(async () => await UnlockReconnect());
                 }
             }
@@ -266,23 +331,23 @@ namespace BluetoothLockScreen
             _updateStatus("重连中...");
             try
             {
-                await ConnectToFirstAnchor();   // 重新扫描并连接
+                await ConnectToFirstAnchor();
                 Log("解锁重连成功");
                 _updateStatus("已重连");
-                _reconnectTimer.Start();        // 恢复定时器后备
+                _reconnectTimer.Start();
             }
             catch (Exception ex)
             {
                 Log($"解锁重连失败: {ex.Message}");
                 _updateStatus("重连中...");
-                _reconnectTimer.Start();        // 仍然启动定时器继续尝试
+                _reconnectTimer.Start();
             }
             finally { _isReconnecting = false; }
         }
 
         private async void OnReconnectTimer(object sender, ElapsedEventArgs e)
         {
-            if (_isReconnecting || !_isMonitoring || _isScreenLocked) return;
+            if (_isReconnecting || !_isMonitoring || _isScreenLocked || _isQuickScanning) return;
             if (_device?.ConnectionStatus == BluetoothConnectionStatus.Connected) return;
 
             _isReconnecting = true;
