@@ -44,7 +44,10 @@ namespace BluetoothLockScreen
 
         private Guid _deviceGuid = Guid.Empty;
         private bool _isScreenLocked = false;
-        private DateTime _lastLockTime = DateTime.MinValue;    // 上次锁屏时间，用于过滤重复事件
+        private DateTime _lastLockTime = DateTime.MinValue;
+
+        // 新：记录最近一次成功重连后的会话ID，用于过滤旧会话关闭事件
+        private string _lastSessionId = null;
 
         public BluetoothManager(Action<string> status, Action<int> rssi, Action<string> name)
         {
@@ -65,8 +68,56 @@ namespace BluetoothLockScreen
         }
 
         // ---------- UI 扫描（仅 BLE-Anchor） ----------
-        public async Task<List<BluetoothDeviceInfo>> ScanDevicesAsync() { /* 同前，省略 */ return new List<BluetoothDeviceInfo>(); }
-        public async Task<List<BluetoothDeviceInfo>> GetPairedDevicesAsync() { /* 同前，省略 */ return new List<BluetoothDeviceInfo>(); }
+        public async Task<List<BluetoothDeviceInfo>> ScanDevicesAsync()
+        {
+            Log("UI扫描：暂停后台监听以释放扫描器");
+            _rssiWatcher?.Stop();
+            _unlockScanWatcher?.Stop();
+
+            var dict = new Dictionary<ulong, BluetoothDeviceInfo>();
+            var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
+            var tcs = new TaskCompletionSource<bool>();
+            watcher.Received += (s, e) =>
+            {
+                if (e.Advertisement.ServiceUuids.Contains(OurServiceUuid))
+                {
+                    if (!dict.ContainsKey(e.BluetoothAddress))
+                        dict[e.BluetoothAddress] = new BluetoothDeviceInfo
+                        {
+                            Address = e.BluetoothAddress,
+                            DisplayName = $"BLE-Anchor ({e.BluetoothAddress:X12})",
+                            Rssi = e.RawSignalStrengthInDBm
+                        };
+                    else
+                        dict[e.BluetoothAddress].Rssi = e.RawSignalStrengthInDBm;
+                }
+            };
+            watcher.Stopped += (s, e) => tcs.TrySetResult(true);
+            watcher.Start();
+            await Task.Delay(5000);
+            watcher.Stop();
+            await tcs.Task;
+            var devices = dict.Values.OrderByDescending(d => d.Rssi).ToList();
+            Log($"UI扫描完成，发现 {devices.Count} 个 BLE-Anchor");
+
+            if (_isMonitoring && !string.IsNullOrEmpty(_deviceAddressStr))
+            {
+                Log("UI扫描：恢复RSSI监听");
+                StartRssiWatcher(Convert.ToUInt64(_deviceAddressStr, 16));
+            }
+            return devices;
+        }
+
+        public async Task<List<BluetoothDeviceInfo>> GetPairedDevicesAsync()
+        {
+            var devices = new List<BluetoothDeviceInfo>();
+            var selector = BluetoothDevice.GetDeviceSelectorFromPairingState(true);
+            var infos = await DeviceInformation.FindAllAsync(selector);
+            foreach (var info in infos)
+                if (info.Properties.TryGetValue("System.Devices.Aep.DeviceAddress", out object prop))
+                    devices.Add(new BluetoothDeviceInfo { Address = Convert.ToUInt64(prop.ToString().Replace(":", ""), 16), DisplayName = $"{info.Name} ({prop})" });
+            return devices;
+        }
 
         // ---------- 自动连接 ----------
         public async Task AutoConnectAndMonitorAsync()
@@ -156,7 +207,26 @@ namespace BluetoothLockScreen
         private async Task ExtractDeviceGuid(ulong addr)
         {
             if (_deviceGuid != Guid.Empty) return;
-            // 同前，略
+            Log("提取设备GUID...");
+            var tcs = new TaskCompletionSource<Guid?>();
+            var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
+            watcher.Received += (s, e) =>
+            {
+                if (e.BluetoothAddress == addr)
+                    foreach (var uuid in e.Advertisement.ServiceUuids)
+                        if (uuid != OurServiceUuid) { tcs.TrySetResult(uuid); watcher.Stop(); return; }
+            };
+            watcher.Stopped += (s, e) => { if (!tcs.Task.IsCompleted) tcs.TrySetResult(null); };
+            watcher.Start();
+            var result = await Task.WhenAny(tcs.Task, Task.Delay(5000));
+            watcher.Stop();
+            if (result is Task<Guid?> gt && gt.Result.HasValue)
+            {
+                _deviceGuid = gt.Result.Value;
+                ConfigManager.Default.DeviceGuid = _deviceGuid.ToString();
+                ConfigManager.Save();
+                Log($"设备GUID: {_deviceGuid}");
+            }
         }
 
         private async Task SetupConnection(BluetoothLEDevice dev, ulong addr)
@@ -165,11 +235,13 @@ namespace BluetoothLockScreen
             _session = await GattSession.FromDeviceIdAsync(dev.BluetoothDeviceId)
                 ?? throw new Exception("无法创建GATT会话");
             _session.MaintainConnection = true;
+            // 记录当前会话的标识（用设备ID简单代表）
+            _lastSessionId = dev.BluetoothDeviceId;
             _session.SessionStatusChanged += OnSessionClosed;
             StartRssiWatcher(addr);
         }
 
-        // ---------- RSSI 监听（快速重连，最多 3 次尝试） ----------
+        // ---------- RSSI 监听（快速重连） ----------
         private void StartRssiWatcher(ulong addr)
         {
             _rssiWatcher?.Stop();
@@ -245,12 +317,12 @@ namespace BluetoothLockScreen
                 ConfigManager.Save();
                 _device = dev;
                 _session = sess;
+                _lastSessionId = dev.BluetoothDeviceId;
                 _session.MaintainConnection = true;
                 _session.SessionStatusChanged += OnSessionClosed;
                 _updateDeviceName(dev.Name);
                 StartRssiWatcher(addr);
 
-                // 增加稳定等待时间到 3 秒
                 await Task.Delay(3000);
                 if (_device?.ConnectionStatus == BluetoothConnectionStatus.Connected)
                 {
@@ -275,8 +347,15 @@ namespace BluetoothLockScreen
         {
             _rssiWatcher?.Stop(); _rssiWatcher = null;
             _unlockScanWatcher?.Stop(); _unlockScanWatcher = null;
-            if (_session != null) { _session.SessionStatusChanged -= OnSessionClosed; _session.MaintainConnection = false; _session.Dispose(); _session = null; }
+            if (_session != null)
+            {
+                _session.SessionStatusChanged -= OnSessionClosed;
+                _session.MaintainConnection = false;
+                _session.Dispose();
+                _session = null;
+            }
             _device?.Dispose(); _device = null;
+            _lastSessionId = null;
         }
 
         // ---------- 系统锁定/解锁事件 ----------
@@ -401,23 +480,31 @@ namespace BluetoothLockScreen
             finally { _isReconnecting = false; }
         }
 
-        // 过滤重复的 GATT 关闭事件（2 秒内只触发一次锁屏）
+        // 改进的 GATT 关闭事件处理：忽略旧会话和快速重连成功后的短时关闭
         private void OnSessionClosed(GattSession sender, GattSessionStatusChangedEventArgs args)
         {
-            if (args.Status == GattSessionStatus.Closed)
+            if (args.Status != GattSessionStatus.Closed) return;
+
+            // 如果 sender 不是当前会话，说明是旧会话残留，忽略
+            if (_session != null && sender != _session)
             {
-                if ((DateTime.Now - _lastLockTime).TotalSeconds < 2)
-                {
-                    Log("GATT关闭事件忽略（重复）");
-                    return;
-                }
-                _lastLockTime = DateTime.Now;
-                Log("GATT会话关闭，触发锁屏");
-                if (!_isScreenLocked)
-                {
-                    LockWorkStation();
-                    _updateStatus("锁屏（断开）");
-                }
+                Log("忽略旧会话关闭事件");
+                return;
+            }
+
+            // 如果在快速重连中或刚刚重连成功（2 秒内），暂不锁屏
+            if (_isAttemptingReconnect || _isReconnecting || (_lastSessionId != null && (DateTime.Now - _lastLockTime).TotalSeconds < 2))
+            {
+                Log("GATT关闭事件忽略（正在重连或刚重连）");
+                return;
+            }
+
+            _lastLockTime = DateTime.Now;
+            Log("GATT会话关闭，触发锁屏");
+            if (!_isScreenLocked)
+            {
+                LockWorkStation();
+                _updateStatus("锁屏（断开）");
             }
         }
 
