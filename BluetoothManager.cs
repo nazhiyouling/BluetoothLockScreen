@@ -8,7 +8,6 @@ using System.Timers;
 using Microsoft.Win32;
 using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.Advertisement;
-using Windows.Devices.Bluetooth.GenericAttributeProfile;
 using Windows.Devices.Enumeration;
 
 namespace BluetoothLockScreen
@@ -22,20 +21,13 @@ namespace BluetoothLockScreen
         private readonly Action<int> _updateRssi;
         private readonly Action<string> _updateDeviceName;
 
-        private BluetoothLEDevice _device;
-        private GattSession _session;
-        private BluetoothLEAdvertisementWatcher _rssiWatcher;
-        private BluetoothLEAdvertisementWatcher _unlockScanWatcher;
+        private BluetoothLEAdvertisementWatcher _watcher;   // 唯一持续扫描器
         private int _rssiThreshold;
         private int _currentRssi = int.MinValue;
         private List<int> _rssiLog = new List<int>();
 
         private bool _isMonitoring = false;
         private string _deviceAddressStr;
-        private Timer _reconnectTimer;
-        private bool _isReconnecting = false;
-        private bool _isAttemptingReconnect = false;
-        private const int ReconnectIntervalMs = 2000;
 
         private static readonly string DataFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data");
         private static readonly string RssiLogPath = Path.Combine(DataFolder, "rssi_log.txt");
@@ -44,14 +36,11 @@ namespace BluetoothLockScreen
 
         private Guid _deviceGuid = Guid.Empty;
         private bool _isScreenLocked = false;
-        private DateTime _lastLockTime = DateTime.MinValue;
 
         public BluetoothManager(Action<string> status, Action<int> rssi, Action<string> name)
         {
             _updateStatus = status; _updateRssi = rssi; _updateDeviceName = name;
             _rssiThreshold = ConfigManager.Default.RssiThreshold;
-            _reconnectTimer = new Timer(ReconnectIntervalMs) { AutoReset = true };
-            _reconnectTimer.Elapsed += OnReconnectTimer;
             Directory.CreateDirectory(DataFolder);
             File.WriteAllText(AppLogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} 程序启动\n");
             SystemEvents.SessionSwitch += OnSessionSwitch;
@@ -64,12 +53,11 @@ namespace BluetoothLockScreen
             System.Diagnostics.Debug.WriteLine(line);
         }
 
-        // ---------- UI 扫描（仅 BLE-Anchor） ----------
+        // ---------- UI 扫描：暂停持续监听，扫描完成后恢复 ----------
         public async Task<List<BluetoothDeviceInfo>> ScanDevicesAsync()
         {
-            Log("UI扫描：暂停后台监听以释放扫描器");
-            _rssiWatcher?.Stop();
-            _unlockScanWatcher?.Stop();
+            Log("UI扫描：暂停持续监听");
+            _watcher?.Stop();
 
             var dict = new Dictionary<ulong, BluetoothDeviceInfo>();
             var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
@@ -97,10 +85,11 @@ namespace BluetoothLockScreen
             var devices = dict.Values.OrderByDescending(d => d.Rssi).ToList();
             Log($"UI扫描完成，发现 {devices.Count} 个 BLE-Anchor");
 
-            if (_isMonitoring && !string.IsNullOrEmpty(_deviceAddressStr))
+            // 恢复持续监听
+            if (_isMonitoring)
             {
-                Log("UI扫描：恢复RSSI监听");
-                StartRssiWatcher(Convert.ToUInt64(_deviceAddressStr, 16));
+                Log("UI扫描：恢复持续监听");
+                StartScanning();
             }
             return devices;
         }
@@ -116,47 +105,30 @@ namespace BluetoothLockScreen
             return devices;
         }
 
-        // ---------- 自动连接 ----------
+        // ---------- 自动监控：启动纯扫描模式 ----------
         public async Task AutoConnectAndMonitorAsync()
         {
             if (_isMonitoring) return;
             if (!string.IsNullOrEmpty(ConfigManager.Default.DeviceGuid))
                 _deviceGuid = Guid.Parse(ConfigManager.Default.DeviceGuid);
-            await ConnectToFirstAnchor();
-            StartReconnectTimer();
-            _isMonitoring = true;
             _updateStatus("监控中...");
+            _isMonitoring = true;
+            StartScanning();
+            Log("纯扫描监控已启动");
+            await Task.CompletedTask;
         }
 
         public async Task StartMonitoringAsync(string addressHex)
         {
-            if (_isMonitoring) throw new InvalidOperationException("已在监控中");
+            if (_isMonitoring) return;
             _deviceAddressStr = addressHex;
             if (!string.IsNullOrEmpty(ConfigManager.Default.DeviceGuid))
                 _deviceGuid = Guid.Parse(ConfigManager.Default.DeviceGuid);
-
-            if (!string.IsNullOrEmpty(_deviceAddressStr))
-            {
-                try
-                {
-                    ulong addr = Convert.ToUInt64(_deviceAddressStr, 16);
-                    _device = await BluetoothLEDevice.FromBluetoothAddressAsync(addr);
-                    if (_device != null)
-                    {
-                        await SetupConnection(_device, addr);
-                        await ExtractDeviceGuid(addr);
-                        StartReconnectTimer();
-                        _isMonitoring = true;
-                        _updateStatus("监控中...");
-                        return;
-                    }
-                }
-                catch { }
-            }
-            await ConnectToFirstAnchor();
-            StartReconnectTimer();
-            _isMonitoring = true;
             _updateStatus("监控中...");
+            _isMonitoring = true;
+            StartScanning();
+            Log($"纯扫描监控已启动，目标地址: {_deviceAddressStr}");
+            await Task.CompletedTask;
         }
 
         public void StopMonitoring()
@@ -164,191 +136,67 @@ namespace BluetoothLockScreen
             _isMonitoring = false;
             _updateStatus("已停止");
             Log("监控停止");
-            StopReconnectTimer();
-            Cleanup();
+            _watcher?.Stop();
+            _watcher = null;
         }
 
         public void UpdateThreshold(int t) => _rssiThreshold = t;
-        public int RecordAndGetRssi() { int r = _currentRssi; lock (_rssiLog) _rssiLog.Add(r); AppendRssi(r); return r; }
-        public async Task<int?> TestConnectionAsync(string addressHex) { return null; }
 
-        // ---------- 核心连接方法 ----------
-        private async Task ConnectToFirstAnchor()
+        public int RecordAndGetRssi()
         {
-            Cleanup();
-            Log("开始扫描 BLE-Anchor...");
-            var tcs = new TaskCompletionSource<ulong>();
-            var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
-            watcher.Received += (s, e) =>
-            {
-                if (_deviceGuid != Guid.Empty && e.Advertisement.ServiceUuids.Contains(_deviceGuid))
-                    tcs.TrySetResult(e.BluetoothAddress);
-                else if (e.Advertisement.ServiceUuids.Contains(OurServiceUuid))
-                    tcs.TrySetResult(e.BluetoothAddress);
-            };
-            watcher.Stopped += (s, e) => { if (!tcs.Task.IsCompleted) watcher.Start(); };
-            watcher.Start();
-            ulong addr = await tcs.Task;
-            watcher.Stop();
-
-            Log($"发现 BLE-Anchor，地址: {addr:X12}");
-            _deviceAddressStr = addr.ToString("X12");
-            ConfigManager.Default.DeviceAddress = _deviceAddressStr;
-            ConfigManager.Save();
-            _device = await BluetoothLEDevice.FromBluetoothAddressAsync(addr)
-                ?? throw new Exception("无法连接设备");
-            await SetupConnection(_device, addr);
-            await ExtractDeviceGuid(addr);
+            int r = _currentRssi;
+            lock (_rssiLog) _rssiLog.Add(r);
+            AppendRssi(r);
+            return r;
         }
 
-        private async Task ExtractDeviceGuid(ulong addr)
-        {
-            if (_deviceGuid != Guid.Empty) return;
-            Log("提取设备GUID...");
-            var tcs = new TaskCompletionSource<Guid?>();
-            var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
-            watcher.Received += (s, e) =>
-            {
-                if (e.BluetoothAddress == addr)
-                    foreach (var uuid in e.Advertisement.ServiceUuids)
-                        if (uuid != OurServiceUuid) { tcs.TrySetResult(uuid); watcher.Stop(); return; }
-            };
-            watcher.Stopped += (s, e) => { if (!tcs.Task.IsCompleted) tcs.TrySetResult(null); };
-            watcher.Start();
-            var result = await Task.WhenAny(tcs.Task, Task.Delay(5000));
-            watcher.Stop();
-            if (result is Task<Guid?> gt && gt.Result.HasValue)
-            {
-                _deviceGuid = gt.Result.Value;
-                ConfigManager.Default.DeviceGuid = _deviceGuid.ToString();
-                ConfigManager.Save();
-                Log($"设备GUID: {_deviceGuid}");
-            }
-        }
+        public async Task<int?> TestConnectionAsync(string addressHex) { return null; } // 不再支持连接测试
 
-        private async Task SetupConnection(BluetoothLEDevice dev, ulong addr)
+        // ---------- 持续扫描器 ----------
+        private void StartScanning()
         {
-            _updateDeviceName(dev.Name);
-            _session = await GattSession.FromDeviceIdAsync(dev.BluetoothDeviceId)
-                ?? throw new Exception("无法创建GATT会话");
-            _session.MaintainConnection = true;
-            _session.SessionStatusChanged += OnSessionClosed;
-            StartRssiWatcher(addr);
-        }
-
-        // ---------- RSSI 监听（快速重连） ----------
-        private void StartRssiWatcher(ulong addr)
-        {
-            _rssiWatcher?.Stop();
-            _rssiWatcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
-            _rssiWatcher.Received += async (s, e) =>
+            _watcher?.Stop();
+            _watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
+            _watcher.Received += OnAdvertisementReceived;
+            _watcher.Stopped += (s, e) =>
             {
-                if (e.BluetoothAddress == addr)
+                if (_isMonitoring)
                 {
-                    _currentRssi = e.RawSignalStrengthInDBm;
-                    _updateRssi(_currentRssi);
-                    if (_currentRssi < _rssiThreshold && _isMonitoring && !_isAttemptingReconnect && !_isScreenLocked)
-                    {
-                        Log($"RSSI={_currentRssi} 低于阈值，快速重连（最多3次）...");
-                        _isAttemptingReconnect = true;
-                        _updateStatus("信号丢失，尝试重连...");
-                        if (!await TryQuickReconnectWithRetry(3))
-                        {
-                            Log("快速重连失败，执行锁屏");
-                            LockWorkStation();
-                            _updateStatus("锁屏（信号丢失）");
-                        }
-                        else
-                        {
-                            Log("快速重连成功");
-                            _updateStatus("监控中...");
-                        }
-                        _isAttemptingReconnect = false;
-                    }
+                    Log("扫描器意外停止，自动重启...");
+                    _watcher.Start();
                 }
             };
-            _rssiWatcher.Start();
+            _watcher.Start();
         }
 
-        private async Task<bool> TryQuickReconnectWithRetry(int maxRetries)
+        private void OnAdvertisementReceived(BluetoothLEAdvertisementWatcher sender, BluetoothLEAdvertisementReceivedEventArgs e)
         {
-            for (int i = 0; i < maxRetries; i++)
+            // 判断是否为目标设备：优先匹配GUID，其次UUID（忽略地址）
+            bool isTarget = false;
+            if (_deviceGuid != Guid.Empty && e.Advertisement.ServiceUuids.Contains(_deviceGuid))
+                isTarget = true;
+            else if (e.Advertisement.ServiceUuids.Contains(OurServiceUuid))
+                isTarget = true;
+
+            if (isTarget)
             {
-                if (await TryQuickReconnectOnce())
-                    return true;
-                Log($"快速重连第 {i + 1} 次失败");
-            }
-            return false;
-        }
-
-        private async Task<bool> TryQuickReconnectOnce()
-        {
-            try
-            {
-                Cleanup();
-                var tcs = new TaskCompletionSource<ulong>();
-                var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
-                watcher.Received += (s, e) =>
-                {
-                    if (_deviceGuid != Guid.Empty && e.Advertisement.ServiceUuids.Contains(_deviceGuid))
-                        tcs.TrySetResult(e.BluetoothAddress);
-                    else if (e.Advertisement.ServiceUuids.Contains(OurServiceUuid))
-                        tcs.TrySetResult(e.BluetoothAddress);
-                };
-                watcher.Start();
-                var done = await Task.WhenAny(tcs.Task, Task.Delay(3000));
-                watcher.Stop();
-                if (done != tcs.Task) return false;
-
-                ulong addr = tcs.Task.Result;
-                Log($"快速重连发现地址: {addr:X12}");
-                var dev = await BluetoothLEDevice.FromBluetoothAddressAsync(addr);
-                if (dev == null) return false;
-                var sess = await GattSession.FromDeviceIdAsync(dev.BluetoothDeviceId);
-                if (sess == null) { dev.Dispose(); return false; }
-
-                _deviceAddressStr = addr.ToString("X12");
-                ConfigManager.Default.DeviceAddress = _deviceAddressStr;
-                ConfigManager.Save();
-                _device = dev;
-                _session = sess;
-                _session.MaintainConnection = true;
-                _session.SessionStatusChanged += OnSessionClosed;
-                _updateDeviceName(dev.Name);
-                StartRssiWatcher(addr);
-
-                await Task.Delay(3000);
-                if (_device?.ConnectionStatus == BluetoothConnectionStatus.Connected)
-                {
-                    Log("快速重连连接稳定");
-                    return true;
-                }
+                int rssi = e.RawSignalStrengthInDBm;
+                // 更新设备名称（如果有）
+                if (!string.IsNullOrEmpty(e.Advertisement.LocalName))
+                    _updateDeviceName(e.Advertisement.LocalName);
                 else
+                    _updateDeviceName("BLE-Anchor");
+                _currentRssi = rssi;
+                _updateRssi(rssi);
+
+                // 锁屏判断
+                if (_isMonitoring && !_isScreenLocked && rssi < _rssiThreshold)
                 {
-                    Log("快速重连后连接不稳定，清理");
-                    Cleanup();
-                    return false;
+                    Log($"RSSI={rssi} 低于阈值，锁屏");
+                    LockWorkStation();
+                    _updateStatus("锁屏（信号丢失）");
                 }
             }
-            catch (Exception ex)
-            {
-                Log($"快速重连异常: {ex.Message}");
-                return false;
-            }
-        }
-
-        private void Cleanup()
-        {
-            _rssiWatcher?.Stop(); _rssiWatcher = null;
-            _unlockScanWatcher?.Stop(); _unlockScanWatcher = null;
-            if (_session != null)
-            {
-                _session.SessionStatusChanged -= OnSessionClosed;
-                _session.MaintainConnection = false;
-                _session.Dispose();
-                _session = null;
-            }
-            _device?.Dispose(); _device = null;
         }
 
         // ---------- 系统锁定/解锁事件 ----------
@@ -356,155 +204,15 @@ namespace BluetoothLockScreen
         {
             if (e.Reason == SessionSwitchReason.SessionLock)
             {
-                Log("系统锁定，暂停重连");
+                Log("系统锁定");
                 _isScreenLocked = true;
-                StopReconnectTimer();
+                // 扫描器继续运行，但锁屏状态下不再次锁屏
             }
             else if (e.Reason == SessionSwitchReason.SessionUnlock)
             {
-                Log("系统解锁，启动立即扫描...");
+                Log("系统解锁");
                 _isScreenLocked = false;
-                if (_isMonitoring)
-                {
-                    StartReconnectTimer();
-                    _ = Task.Run(async () => await UnlockImmediateScan());
-                }
-            }
-        }
-
-        private async Task UnlockImmediateScan()
-        {
-            if (_isReconnecting || !_isMonitoring)
-            {
-                Log("解锁扫描被阻塞: _isReconnecting=" + _isReconnecting);
-                return;
-            }
-            _isReconnecting = true;
-            Log("解锁扫描：高优先级扫描器（3秒超时）");
-            _updateStatus("重连中...");
-
-            _unlockScanWatcher?.Stop();
-            _unlockScanWatcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
-            var tcs = new TaskCompletionSource<ulong>();
-            _unlockScanWatcher.Received += (s, e) =>
-            {
-                if (_deviceGuid != Guid.Empty && e.Advertisement.ServiceUuids.Contains(_deviceGuid))
-                {
-                    Log("解锁扫描：GUID匹配 " + e.BluetoothAddress.ToString("X12"));
-                    tcs.TrySetResult(e.BluetoothAddress);
-                }
-                else if (e.Advertisement.ServiceUuids.Contains(OurServiceUuid))
-                {
-                    Log("解锁扫描：UUID匹配 " + e.BluetoothAddress.ToString("X12"));
-                    tcs.TrySetResult(e.BluetoothAddress);
-                }
-            };
-            _unlockScanWatcher.Stopped += (s, e) => { if (!tcs.Task.IsCompleted) _unlockScanWatcher.Start(); };
-            _unlockScanWatcher.Start();
-            var completed = await Task.WhenAny(tcs.Task, Task.Delay(3000));
-            _unlockScanWatcher.Stop();
-            _unlockScanWatcher = null;
-
-            if (completed == tcs.Task)
-            {
-                ulong addr = tcs.Task.Result;
-                Log("解锁扫描成功，连接: " + addr.ToString("X12"));
-                try
-                {
-                    Cleanup();
-                    var dev = await BluetoothLEDevice.FromBluetoothAddressAsync(addr);
-                    if (dev != null)
-                    {
-                        await SetupConnection(dev, addr);
-                        await ExtractDeviceGuid(addr);
-                        _deviceAddressStr = addr.ToString("X12");
-                        ConfigManager.Default.DeviceAddress = _deviceAddressStr;
-                        ConfigManager.Save();
-                        Log("解锁重连完成");
-                        _updateStatus("已重连");
-                    }
-                }
-                catch (Exception ex) { Log("解锁连接异常: " + ex.Message); }
-            }
-            else
-            {
-                Log("解锁扫描超时，交由定时器处理");
-                _updateStatus("重连中...");
-            }
-            _isReconnecting = false;
-        }
-
-        private void StartReconnectTimer() { if (!_isScreenLocked) _reconnectTimer.Start(); }
-        private void StopReconnectTimer() { _reconnectTimer.Stop(); }
-
-        private async void OnReconnectTimer(object sender, ElapsedEventArgs e)
-        {
-            if (_isReconnecting || !_isMonitoring || _isAttemptingReconnect)
-            {
-                Log("定时器跳过: " + (_isReconnecting ? "重连中" : "尝试重连中"));
-                return;
-            }
-            if (_device?.ConnectionStatus == BluetoothConnectionStatus.Connected) return;
-
-            _isReconnecting = true;
-            Log("定时器重连...");
-            _updateStatus("重连中...");
-            Cleanup();
-            try
-            {
-                await ConnectToFirstAnchor();
-                await Task.Delay(3000);
-                if (_device?.ConnectionStatus == BluetoothConnectionStatus.Connected)
-                {
-                    Log("定时器重连稳定");
-                    _updateStatus("已重连");
-                }
-                else
-                {
-                    Log("定时器重连后不稳定");
-                    Cleanup();
-                }
-            }
-            catch (Exception ex)
-            {
-                Log("定时器重连失败: " + ex.Message);
-                _updateStatus("重连中...");
-            }
-            finally { _isReconnecting = false; }
-        }
-
-        // GATT 会话关闭事件处理：忽略旧会话和重连过程中的短暂关闭
-        private void OnSessionClosed(GattSession sender, GattSessionStatusChangedEventArgs args)
-        {
-            if (args.Status != GattSessionStatus.Closed) return;
-
-            // 如果 sender 不是当前活动的会话，忽略（旧连接残留）
-            if (_session != null && sender != _session)
-            {
-                Log("忽略旧会话关闭事件");
-                return;
-            }
-
-            // 如果在快速重连或定时器重连过程中，忽略关闭事件，避免误锁屏
-            if (_isAttemptingReconnect || _isReconnecting)
-            {
-                Log("GATT关闭事件忽略（正在重连中）");
-                return;
-            }
-
-            // 短时间内重复的关闭事件忽略（防抖）
-            if ((DateTime.Now - _lastLockTime).TotalSeconds < 2)
-            {
-                Log("GATT关闭事件忽略（重复）");
-                return;
-            }
-
-            _lastLockTime = DateTime.Now;
-            Log("GATT会话关闭，触发锁屏");
-            if (!_isScreenLocked)
-            {
-                LockWorkStation();
-                _updateStatus("锁屏（断开）");
+                // 扫描器始终在运行，解锁后自动开始判断
             }
         }
 
@@ -517,7 +225,6 @@ namespace BluetoothLockScreen
         {
             StopMonitoring();
             SystemEvents.SessionSwitch -= OnSessionSwitch;
-            _reconnectTimer?.Dispose();
         }
     }
 }
