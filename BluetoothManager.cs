@@ -31,7 +31,7 @@ namespace BluetoothLockScreen
         private List<int> _rssiLog = new List<int>();
 
         private bool _isMonitoring = false;
-        private string _deviceAddressStr;              // 仅记录最近地址，不作为首选连接目标
+        private string _deviceAddressStr;
         private Timer _reconnectTimer;
         private bool _isReconnecting = false;
         private bool _isQuickScanning = false;
@@ -44,10 +44,10 @@ namespace BluetoothLockScreen
 
         private Guid _deviceGuid = Guid.Empty;
         private bool _isScreenLocked = false;
-        private DateTime _lastLockTime = DateTime.MinValue;        // 用于锁屏冷却
-        private DateTime _lastReconnectTime = DateTime.MinValue;   // 用于重连稳定宽限期
-        private int _lowRssiCount = 0;                             // 连续低RSSI计数
-        private int _disconnectCount = 0;                          // 连续断开计数（定时器用）
+        private DateTime _lastLockTime = DateTime.MinValue;
+        private DateTime _lastReconnectTime = DateTime.MinValue;
+        private int _lowRssiCount = 0;
+        private int _disconnectCount = 0;
 
         public BluetoothManager(Action<string> status, Action<int> rssi, Action<string> name)
         {
@@ -120,7 +120,6 @@ namespace BluetoothLockScreen
         public async Task StartMonitoringAsync(string addressHex)
         {
             if (_isMonitoring) return;
-            // 忽略传入的地址，改为扫描
             if (!string.IsNullOrEmpty(ConfigManager.Default.DeviceGuid))
                 _deviceGuid = Guid.Parse(ConfigManager.Default.DeviceGuid);
             await ConnectToFirstAnchor();
@@ -169,7 +168,7 @@ namespace BluetoothLockScreen
                 ?? throw new Exception("无法连接设备");
             await SetupConnection(_device, addr);
             await ExtractDeviceGuid(addr);
-            _lastReconnectTime = DateTime.Now; // 记录重连时间（用于宽限期）
+            _lastReconnectTime = DateTime.Now;
         }
 
         private async Task ExtractDeviceGuid(ulong addr)
@@ -219,7 +218,6 @@ namespace BluetoothLockScreen
                     _currentRssi = e.RawSignalStrengthInDBm;
                     _updateRssi(_currentRssi);
 
-                    // 连续低值计数
                     if (_currentRssi < _rssiThreshold)
                     {
                         _lowRssiCount++;
@@ -230,7 +228,6 @@ namespace BluetoothLockScreen
                         _lowRssiCount = 0;
                     }
 
-                    // 连续3次低值且未锁屏、未快速扫描时触发快速扫描
                     if (_lowRssiCount >= 3 && _isMonitoring && !_isScreenLocked && !_isQuickScanning)
                     {
                         _lowRssiCount = 0;
@@ -296,7 +293,7 @@ namespace BluetoothLockScreen
                 _session.SessionStatusChanged += OnSessionClosed;
                 _updateDeviceName(dev.Name);
                 StartRssiWatcher(addr);
-                _lastReconnectTime = DateTime.Now;   // 重连成功时间
+                _lastReconnectTime = DateTime.Now;
                 return true;
             }
             catch (Exception ex)
@@ -401,20 +398,20 @@ namespace BluetoothLockScreen
             }
         }
 
-        // ---------- GATT关闭事件处理（方案1+2：仅记录，不锁屏） ----------
+        // ---------- GATT关闭事件处理（方案1+3：恢复锁屏，但带宽限期和冷却） ----------
         private void OnSessionClosed(GattSession sender, GattSessionStatusChangedEventArgs args)
         {
             if (args.Status != GattSessionStatus.Closed) return;
 
-            // 方案1：重连稳定宽限期（3秒内忽略）
+            // 重连稳定宽限期：3秒内忽略
             if ((DateTime.Now - _lastReconnectTime).TotalSeconds < 3)
             {
                 Log("GATT关闭事件忽略（重连宽限期内）");
                 return;
             }
 
-            Log("GATT会话关闭（仅记录，不触发锁屏）");
-            // 不再调用 LockWorkStation()
+            Log("GATT会话关闭，触发锁屏（带冷却）");
+            TryLockWorkStation();
         }
 
         // ---------- 锁屏冷却（方案3） ----------
