@@ -49,6 +49,10 @@ namespace BluetoothLockScreen
         private int _lowRssiCount = 0;
         private int _disconnectCount = 0;
 
+        // 看门狗相关
+        private DateTime _lastPacketTime = DateTime.MinValue;
+        private const int PacketTimeoutSeconds = 5;   // 修改为 5 秒
+
         public BluetoothManager(Action<string> status, Action<int> rssi, Action<string> name)
         {
             _updateStatus = status; _updateRssi = rssi; _updateDeviceName = name;
@@ -67,7 +71,7 @@ namespace BluetoothLockScreen
             System.Diagnostics.Debug.WriteLine(line);
         }
 
-        // ---------- UI 扫描（仅 BLE-Anchor） ----------
+        // ---------- UI 扫描 ----------
         public async Task<List<BluetoothDeviceInfo>> ScanDevicesAsync()
         {
             Log("UI扫描：暂停后台监听");
@@ -105,7 +109,7 @@ namespace BluetoothLockScreen
 
         public async Task<List<BluetoothDeviceInfo>> GetPairedDevicesAsync() { return new List<BluetoothDeviceInfo>(); }
 
-        // ---------- 监控启动（方案5：直接扫描，不依赖旧地址） ----------
+        // ---------- 监控启动 ----------
         public async Task AutoConnectAndMonitorAsync()
         {
             if (_isMonitoring) return;
@@ -141,7 +145,7 @@ namespace BluetoothLockScreen
         public int RecordAndGetRssi() { int r = _currentRssi; lock (_rssiLog) _rssiLog.Add(r); AppendRssi(r); return r; }
         public async Task<int?> TestConnectionAsync(string addressHex) { return null; }
 
-        // ---------- 核心连接：只扫描 GUID / UUID，不使用旧地址（方案5） ----------
+        // ---------- 核心连接：只扫描 GUID / UUID ----------
         private async Task ConnectToFirstAnchor()
         {
             Cleanup();
@@ -169,6 +173,7 @@ namespace BluetoothLockScreen
             await SetupConnection(_device, addr);
             await ExtractDeviceGuid(addr);
             _lastReconnectTime = DateTime.Now;
+            _lastPacketTime = DateTime.Now;
         }
 
         private async Task ExtractDeviceGuid(ulong addr)
@@ -206,7 +211,7 @@ namespace BluetoothLockScreen
             StartRssiWatcher(addr);
         }
 
-        // ---------- RSSI 监听（方案2：连续低值触发快速扫描） ----------
+        // ---------- RSSI 监听 ----------
         private void StartRssiWatcher(ulong addr)
         {
             _rssiWatcher?.Stop();
@@ -215,6 +220,7 @@ namespace BluetoothLockScreen
             {
                 if (e.BluetoothAddress == addr)
                 {
+                    _lastPacketTime = DateTime.Now;
                     _currentRssi = e.RawSignalStrengthInDBm;
                     _updateRssi(_currentRssi);
 
@@ -255,7 +261,7 @@ namespace BluetoothLockScreen
         }
 
         /// <summary>
-        /// 快速扫描2秒，尝试找到目标设备并重建连接（方案5）
+        /// 快速扫描2秒，尝试找到目标设备并重建连接
         /// </summary>
         private async Task<bool> QuickScanAndReconnect()
         {
@@ -294,6 +300,7 @@ namespace BluetoothLockScreen
                 _updateDeviceName(dev.Name);
                 StartRssiWatcher(addr);
                 _lastReconnectTime = DateTime.Now;
+                _lastPacketTime = DateTime.Now;
                 return true;
             }
             catch (Exception ex)
@@ -349,6 +356,7 @@ namespace BluetoothLockScreen
                 _updateStatus("已重连");
                 _reconnectTimer.Start();
                 _disconnectCount = 0;
+                _lastPacketTime = DateTime.Now;
             }
             catch (Exception ex)
             {
@@ -359,7 +367,7 @@ namespace BluetoothLockScreen
             finally { _isReconnecting = false; }
         }
 
-        // ---------- 定时器重连（方案6：连续断开检测） ----------
+        // ---------- 定时器任务：连续断开检测 + 看门狗 ----------
         private async void OnReconnectTimer(object sender, ElapsedEventArgs e)
         {
             if (_isReconnecting || !_isMonitoring || _isScreenLocked || _isQuickScanning) return;
@@ -380,6 +388,7 @@ namespace BluetoothLockScreen
                         await ConnectToFirstAnchor();
                         Log("定时器重连成功");
                         _updateStatus("已重连");
+                        _lastPacketTime = DateTime.Now;
                     }
                     catch (Exception ex)
                     {
@@ -396,14 +405,33 @@ namespace BluetoothLockScreen
                     _disconnectCount = 0;
                 }
             }
+
+            // 看门狗：超过5秒未收到RSSI包
+            if (!_isScreenLocked && (DateTime.Now - _lastPacketTime).TotalSeconds > PacketTimeoutSeconds)
+            {
+                Log($"看门狗触发：{PacketTimeoutSeconds}秒未收到RSSI包，启动快速扫描");
+                _isQuickScanning = true;
+                bool found = await QuickScanAndReconnect();
+                if (!found)
+                {
+                    Log("看门狗快速扫描未发现设备，执行锁屏");
+                    TryLockWorkStation();
+                    _updateStatus("锁屏（信号丢失）");
+                }
+                else
+                {
+                    Log("看门狗快速扫描成功，已更新连接");
+                    _updateStatus("监控中...");
+                }
+                _isQuickScanning = false;
+            }
         }
 
-        // ---------- GATT关闭事件处理（方案1+3：恢复锁屏，但带宽限期和冷却） ----------
+        // ---------- GATT关闭事件处理 ----------
         private void OnSessionClosed(GattSession sender, GattSessionStatusChangedEventArgs args)
         {
             if (args.Status != GattSessionStatus.Closed) return;
 
-            // 重连稳定宽限期：3秒内忽略
             if ((DateTime.Now - _lastReconnectTime).TotalSeconds < 3)
             {
                 Log("GATT关闭事件忽略（重连宽限期内）");
@@ -414,7 +442,7 @@ namespace BluetoothLockScreen
             TryLockWorkStation();
         }
 
-        // ---------- 锁屏冷却（方案3） ----------
+        // ---------- 锁屏冷却 ----------
         private void TryLockWorkStation()
         {
             if ((DateTime.Now - _lastLockTime).TotalSeconds < 5)
