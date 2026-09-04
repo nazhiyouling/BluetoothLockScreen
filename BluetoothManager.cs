@@ -49,14 +49,13 @@ namespace BluetoothLockScreen
         private int _lowRssiCount = 0;
         private int _disconnectCount = 0;
 
-        // 看门狗相关
         private DateTime _lastPacketTime = DateTime.MinValue;
-        private const int PacketTimeoutSeconds = 5;   // 修改为 5 秒
+        private const int PacketTimeoutSeconds = 5;
 
         public BluetoothManager(Action<string> status, Action<int> rssi, Action<string> name)
         {
             _updateStatus = status; _updateRssi = rssi; _updateDeviceName = name;
-            _rssiThreshold = ConfigManager.Default.RssiThreshold <= 0 ? ConfigManager.Default.RssiThreshold : -100;
+            _rssiThreshold = ConfigManager.Default.RssiThreshold <= 0 ? ConfigManager.Default.RssiThreshold : -83;
             _reconnectTimer = new Timer(ReconnectIntervalMs) { AutoReset = true };
             _reconnectTimer.Elapsed += OnReconnectTimer;
             Directory.CreateDirectory(DataFolder);
@@ -234,10 +233,11 @@ namespace BluetoothLockScreen
                         _lowRssiCount = 0;
                     }
 
-                    if (_lowRssiCount >= 3 && _isMonitoring && !_isScreenLocked && !_isQuickScanning)
+                    // 连续2次低值即触发快速扫描
+                    if (_lowRssiCount >= 2 && _isMonitoring && !_isScreenLocked && !_isQuickScanning)
                     {
                         _lowRssiCount = 0;
-                        Log("连续3次低RSSI，启动快速扫描...");
+                        Log("连续2次低RSSI，启动快速扫描...");
                         _isQuickScanning = true;
                         _updateStatus("信号弱，确认设备...");
 
@@ -250,8 +250,19 @@ namespace BluetoothLockScreen
                         }
                         else
                         {
-                            Log("快速扫描成功，已更新连接");
-                            _updateStatus("监控中...");
+                            // 快速扫描成功，但需要再次确认RSSI是否仍低于阈值
+                            await Task.Delay(2000); // 等待新的RSSI更新
+                            if (_currentRssi < _rssiThreshold)
+                            {
+                                Log($"快速扫描后RSSI仍低 ({_currentRssi})，执行锁屏");
+                                TryLockWorkStation();
+                                _updateStatus("锁屏（距离过远）");
+                            }
+                            else
+                            {
+                                Log("快速扫描成功且信号恢复，保持连接");
+                                _updateStatus("监控中...");
+                            }
                         }
                         _isQuickScanning = false;
                     }
