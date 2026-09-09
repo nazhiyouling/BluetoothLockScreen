@@ -37,6 +37,10 @@ namespace BluetoothLockScreen
         private bool _isQuickScanning = false;
         private const int ReconnectIntervalMs = 2000;
 
+        // 新增：扫描冷却相关
+        private DateTime _lastQuickScanTime = DateTime.MinValue;
+        private const int QuickScanCooldownSeconds = 30;   // 30秒内不重复触发快速扫描
+
         private static readonly string DataFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data");
         private static readonly string RssiLogPath = Path.Combine(DataFolder, "rssi_log.txt");
         private static readonly string AppLogPath = Path.Combine(DataFolder, "app_log.txt");
@@ -70,7 +74,7 @@ namespace BluetoothLockScreen
             System.Diagnostics.Debug.WriteLine(line);
         }
 
-        // ---------- UI 扫描（仅 BLE-Anchor，显示地址） ----------
+        // ---------- UI 扫描（按 GUID 过滤，仅显示唯一设备） ----------
         public async Task<List<BluetoothDeviceInfo>> ScanDevicesAsync()
         {
             Log("UI扫描：暂停后台监听");
@@ -82,10 +86,17 @@ namespace BluetoothLockScreen
             var tcs = new TaskCompletionSource<bool>();
             watcher.Received += (s, e) =>
             {
-                if (e.Advertisement.ServiceUuids.Contains(OurServiceUuid))
+                bool isOurDevice;
+                if (_deviceGuid != Guid.Empty)
+                    isOurDevice = e.Advertisement.ServiceUuids.Contains(_deviceGuid);
+                else
+                    isOurDevice = e.Advertisement.ServiceUuids.Contains(OurServiceUuid);
+
+                if (isOurDevice)
                 {
+                    string displayName = $"BLE-Anchor ({e.BluetoothAddress:X12})";
                     if (!dict.ContainsKey(e.BluetoothAddress))
-                        dict[e.BluetoothAddress] = new BluetoothDeviceInfo { Address = e.BluetoothAddress, DisplayName = $"BLE-Anchor ({e.BluetoothAddress:X12})", Rssi = e.RawSignalStrengthInDBm };
+                        dict[e.BluetoothAddress] = new BluetoothDeviceInfo { Address = e.BluetoothAddress, DisplayName = displayName, Rssi = e.RawSignalStrengthInDBm };
                     else
                         dict[e.BluetoothAddress].Rssi = e.RawSignalStrengthInDBm;
                 }
@@ -96,7 +107,7 @@ namespace BluetoothLockScreen
             watcher.Stop();
             await tcs.Task;
             var devices = dict.Values.OrderByDescending(d => d.Rssi).ToList();
-            Log($"UI扫描完成，找到 {devices.Count} 个设备");
+            Log($"UI扫描完成，找到 {devices.Count} 个设备（已按GUID过滤）");
 
             if (_isMonitoring && !string.IsNullOrEmpty(_deviceAddressStr))
             {
@@ -144,7 +155,7 @@ namespace BluetoothLockScreen
         public int RecordAndGetRssi() { int r = _currentRssi; lock (_rssiLog) _rssiLog.Add(r); AppendRssi(r); return r; }
         public async Task<int?> TestConnectionAsync(string addressHex) { return null; }
 
-        // ---------- 核心连接：只扫描 GUID / UUID，排除当前地址 ----------
+        // ---------- 连接：扫描并连接任意匹配 GUID 的设备 ----------
         private async Task ConnectToFirstAnchor()
         {
             Cleanup();
@@ -153,10 +164,6 @@ namespace BluetoothLockScreen
             var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
             watcher.Received += (s, e) =>
             {
-                // 只接受与当前地址不同的广播（连接新地址用）
-                if (!string.IsNullOrEmpty(_deviceAddressStr) && e.BluetoothAddress.ToString("X12") == _deviceAddressStr)
-                    return;
-
                 if (_deviceGuid != Guid.Empty && e.Advertisement.ServiceUuids.Contains(_deviceGuid))
                     tcs.TrySetResult(e.BluetoothAddress);
                 else if (e.Advertisement.ServiceUuids.Contains(OurServiceUuid))
@@ -167,7 +174,7 @@ namespace BluetoothLockScreen
             ulong addr = await tcs.Task;
             watcher.Stop();
 
-            Log($"发现新设备: {addr:X12}");
+            Log($"发现设备: {addr:X12}");
             _deviceAddressStr = addr.ToString("X12");
             ConfigManager.Default.DeviceAddress = _deviceAddressStr;
             ConfigManager.Save();
@@ -214,7 +221,7 @@ namespace BluetoothLockScreen
             StartRssiWatcher(addr);
         }
 
-        // ---------- RSSI 监听（连续低值触发新地址扫描） ----------
+        // ---------- RSSI 监听（低值触发扫描，扫描到任意设备则保持连接） ----------
         private void StartRssiWatcher(ulong addr)
         {
             _rssiWatcher?.Stop();
@@ -237,27 +244,29 @@ namespace BluetoothLockScreen
                         _lowRssiCount = 0;
                     }
 
-                    // 连续2次低值触发新地址扫描
-                    if (_lowRssiCount >= 2 && _isMonitoring && !_isScreenLocked && !_isQuickScanning)
+                    // 连续3次低值且不在冷却期且未在扫描中
+                    if (_lowRssiCount >= 3 && _isMonitoring && !_isScreenLocked && !_isQuickScanning &&
+                        (DateTime.Now - _lastQuickScanTime).TotalSeconds >= QuickScanCooldownSeconds)
                     {
                         _lowRssiCount = 0;
-                        Log("连续2次低RSSI，启动新地址扫描...");
+                        Log("连续3次低RSSI，启动扫描确认设备...");
                         _isQuickScanning = true;
-                        _updateStatus("信号弱，寻找新地址...");
+                        _updateStatus("信号弱，确认设备...");
 
-                        bool foundNewAddr = await QuickScanForNewAddress();
-                        if (!foundNewAddr)
+                        bool deviceFound = await QuickScanForDevice();
+                        if (!deviceFound)
                         {
-                            Log("2秒内未发现新地址，执行锁屏");
+                            Log("扫描2秒内未发现设备，执行锁屏");
                             TryLockWorkStation();
                             _updateStatus("锁屏（设备离开）");
                         }
                         else
                         {
-                            Log("新地址扫描成功，已更新连接");
+                            Log("扫描到设备，继续监控");
                             _updateStatus("监控中...");
                         }
                         _isQuickScanning = false;
+                        _lastQuickScanTime = DateTime.Now;   // 更新冷却时间
                     }
                 }
             };
@@ -265,19 +274,15 @@ namespace BluetoothLockScreen
         }
 
         /// <summary>
-        /// 快速扫描2秒，只接受与当前地址不同的新地址，找到后立即连接
+        /// 扫描2秒，寻找任意匹配 GUID/UUID 的设备，找到则重连（不锁屏），找不到返回 false
         /// </summary>
-        private async Task<bool> QuickScanForNewAddress()
+        private async Task<bool> QuickScanForDevice()
         {
-            Cleanup(); // 停止当前连接和监听
+            Cleanup(); // 释放扫描器
             var tcs = new TaskCompletionSource<ulong>();
             var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
             watcher.Received += (s, e) =>
             {
-                // 忽略当前地址
-                if (!string.IsNullOrEmpty(_deviceAddressStr) && e.BluetoothAddress.ToString("X12") == _deviceAddressStr)
-                    return;
-
                 if (_deviceGuid != Guid.Empty && e.Advertisement.ServiceUuids.Contains(_deviceGuid))
                     tcs.TrySetResult(e.BluetoothAddress);
                 else if (e.Advertisement.ServiceUuids.Contains(OurServiceUuid))
@@ -287,18 +292,18 @@ namespace BluetoothLockScreen
             var completed = await Task.WhenAny(tcs.Task, Task.Delay(2000));
             watcher.Stop();
 
-            if (completed != tcs.Task) return false; // 超时，无新地址
+            if (completed != tcs.Task) return false; // 超时，无设备
 
-            ulong newAddr = tcs.Task.Result;
-            Log($"发现新地址: {newAddr:X12}");
+            ulong addr = tcs.Task.Result;
+            Log($"扫描到设备: {addr:X12}");
             try
             {
-                var dev = await BluetoothLEDevice.FromBluetoothAddressAsync(newAddr);
+                var dev = await BluetoothLEDevice.FromBluetoothAddressAsync(addr);
                 if (dev == null) return false;
                 var sess = await GattSession.FromDeviceIdAsync(dev.BluetoothDeviceId);
                 if (sess == null) { dev.Dispose(); return false; }
 
-                _deviceAddressStr = newAddr.ToString("X12");
+                _deviceAddressStr = addr.ToString("X12");
                 ConfigManager.Default.DeviceAddress = _deviceAddressStr;
                 ConfigManager.Save();
                 _device = dev;
@@ -306,14 +311,14 @@ namespace BluetoothLockScreen
                 _session.MaintainConnection = true;
                 _session.SessionStatusChanged += OnSessionClosed;
                 _updateDeviceName(dev.Name);
-                StartRssiWatcher(newAddr);
+                StartRssiWatcher(addr);
                 _lastReconnectTime = DateTime.Now;
                 _lastPacketTime = DateTime.Now;
                 return true;
             }
             catch (Exception ex)
             {
-                Log($"新地址连接失败: {ex.Message}");
+                Log($"连接失败: {ex.Message}");
                 return false;
             }
         }
@@ -417,21 +422,22 @@ namespace BluetoothLockScreen
             // 看门狗：超过5秒未收到RSSI包
             if (!_isScreenLocked && (DateTime.Now - _lastPacketTime).TotalSeconds > PacketTimeoutSeconds)
             {
-                Log($"看门狗触发：{PacketTimeoutSeconds}秒未收到RSSI包，启动新地址扫描");
+                Log($"看门狗触发：{PacketTimeoutSeconds}秒未收到RSSI包，启动扫描确认");
                 _isQuickScanning = true;
-                bool found = await QuickScanForNewAddress();
+                bool found = await QuickScanForDevice();
                 if (!found)
                 {
-                    Log("看门狗未发现新地址，执行锁屏");
+                    Log("看门狗未发现设备，执行锁屏");
                     TryLockWorkStation();
                     _updateStatus("锁屏（信号丢失）");
                 }
                 else
                 {
-                    Log("看门狗新地址扫描成功");
+                    Log("看门狗扫描到设备，继续监控");
                     _updateStatus("监控中...");
                 }
                 _isQuickScanning = false;
+                _lastQuickScanTime = DateTime.Now;
             }
         }
 
