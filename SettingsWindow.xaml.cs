@@ -16,8 +16,8 @@ namespace BluetoothLockScreen
             DeviceListBox.ItemsSource = _devices;
 
             RssiThresholdBox.Text = ConfigManager.Default.RssiThreshold.ToString();
+            ExpectedNameBox.Text = ConfigManager.Default.ExpectedDeviceName;
             ManualAddressBox.Text = ConfigManager.Default.DeviceAddress;
-            ExpectedNameBox.Text = ConfigManager.Default.ExpectedDeviceName;   // 加载名称
         }
 
         private async void ScanButton_Click(object sender, RoutedEventArgs e)
@@ -35,20 +35,6 @@ namespace BluetoothLockScreen
                 ManualAddressBox.Text = info.Address.ToString("X12");
         }
 
-        private void SaveManualAddress_Click(object sender, RoutedEventArgs e)
-        {
-            var addr = ManualAddressBox.Text.Trim().Replace(":", "").Replace("-", "").ToUpper();
-            if (string.IsNullOrWhiteSpace(addr) || addr.Length != 12)
-            {
-                MessageBox.Show("地址格式错误（需12位十六进制）。");
-                return;
-            }
-            ConfigManager.Default.DeviceAddress = addr;
-            ConfigManager.Default.DeviceName = "手动输入";
-            ConfigManager.Save();
-            MessageBox.Show("地址已保存。");
-        }
-
         private void RecordRssiButton_Click(object sender, RoutedEventArgs e)
         {
             int r = _btManager.RecordAndGetRssi();
@@ -64,18 +50,32 @@ namespace BluetoothLockScreen
                 return;
             }
 
-            ConfigManager.Default.RssiThreshold = th;
-            ConfigManager.Default.ExpectedDeviceName = ExpectedNameBox.Text.Trim();   // 保存名称
+            string expectedName = ExpectedNameBox.Text.Trim();
+            if (string.IsNullOrWhiteSpace(expectedName))
+            {
+                MessageBox.Show("期望设备名称不能为空。");
+                return;
+            }
+            if (expectedName.Length > 32)
+            {
+                MessageBox.Show("期望设备名称过长，建议不超过 32 个字符。");
+                return;
+            }
 
-            var addr = ManualAddressBox.Text.Trim().Replace(":", "").Replace("-", "").ToUpper();
+            ConfigManager.Default.RssiThreshold = th;
+            ConfigManager.Default.ExpectedDeviceName = expectedName;
+
+            string addr = ManualAddressBox.Text.Trim().Replace(":", "").Replace("-", "").ToUpper();
             if (!string.IsNullOrWhiteSpace(addr) && addr.Length == 12)
             {
                 ConfigManager.Default.DeviceAddress = addr;
-                ConfigManager.Default.DeviceName = "手动配置";
+                ConfigManager.Default.DeviceName = expectedName;
             }
 
             ConfigManager.Save();
             _btManager.UpdateThreshold(th);
+            _btManager.UpdateExpectedDeviceName(expectedName);
+
             DialogResult = true;
             Close();
         }
@@ -85,5 +85,12 @@ namespace BluetoothLockScreen
             DialogResult = false;
             Close();
         }
+    }
+
+    public class BluetoothDeviceInfo
+    {
+        public ulong Address { get; set; }
+        public string DisplayName { get; set; } = "";
+        public int Rssi { get; set; } = int.MinValue;
     }
 }
