@@ -22,7 +22,8 @@ namespace BluetoothLockScreen
         public static void Save()
         {
             EnsureFolder();
-            File.WriteAllText(ConfigPath, JsonSerializer.Serialize(_config, new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(ConfigPath,
+                JsonSerializer.Serialize(_config, new JsonSerializerOptions { WriteIndented = true }));
         }
 
         private static ConfigData Load()
@@ -32,7 +33,8 @@ namespace BluetoothLockScreen
             {
                 try
                 {
-                    return JsonSerializer.Deserialize<ConfigData>(File.ReadAllText(ConfigPath)) ?? new ConfigData();
+                    return JsonSerializer.Deserialize<ConfigData>(File.ReadAllText(ConfigPath))
+                           ?? new ConfigData();
                 }
                 catch { }
             }
@@ -48,8 +50,6 @@ namespace BluetoothLockScreen
         public string DeviceName { get; set; } = "";
         public int RssiThreshold { get; set; } = -83;
         public string DeviceGuid { get; set; } = "";
-
-        // 新增：期望匹配的设备名称（系统蓝牙名称），留空则不校验
-        public string ExpectedDeviceName { get; set; } = "";
+        public string ExpectedDeviceName { get; set; } = "Ghost-BLE-Anchor";
     }
 }
