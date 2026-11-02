@@ -1,7 +1,7 @@
 <Window x:Class="BluetoothLockScreen.SettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="设置" Height="600" Width="500"
+        Title="设置" Height="600" Width="480"
         WindowStartupLocation="CenterOwner"
         Icon="Resources/app.ico" ResizeMode="CanResizeWithGrip">
     <Grid Margin="10">
@@ -17,7 +17,7 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- RSSI 阈值 -->
+        <!-- RSSI阈值 -->
         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
             <TextBlock Text="RSSI锁屏阈值 (dBm):" VerticalAlignment="Center" Width="140"/>
             <TextBox x:Name="RssiThresholdBox" Width="80" VerticalAlignment="Center"/>
@@ -26,44 +26,46 @@
 
         <!-- 期望设备名称 -->
         <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,10">
-            <TextBlock Text="期望设备名称:" VerticalAlignment="Center" Width="100"/>
+            <TextBlock Text="期望设备名称:" VerticalAlignment="Center" Width="140"/>
             <TextBox x:Name="ExpectedNameBox" Width="220" VerticalAlignment="Center"
-                     ToolTip="填写手机系统蓝牙名称（可在手机设置中查看），留空则不校验名称"/>
+                     ToolTip="必须与手机蓝牙名称完全一致"/>
         </StackPanel>
-        <TextBlock Grid.Row="2"
-                   Text="* 留空则连接任意 BLE-Anchor 设备；填写后只连接名称完全一致的设备"
-                   FontSize="11" Foreground="Gray" Margin="0,0,0,10"/>
+        <TextBlock Grid.Row="2" Text="* 需与手机 APP 中设置的蓝牙名称完全一致（区分大小写）"
+                   FontSize="11" Foreground="Gray" Margin="0,0,0,10" TextWrapping="Wrap"/>
 
-        <!-- 手动输入地址 -->
+        <!-- 手动地址 -->
         <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,0,0,10">
-            <TextBlock Text="设备蓝牙地址:" VerticalAlignment="Center" Width="100"/>
+            <TextBlock Text="设备蓝牙地址:" VerticalAlignment="Center" Width="140"/>
             <TextBox x:Name="ManualAddressBox" Width="180" VerticalAlignment="Center"
-                     ToolTip="例如：A1:B2:C3:D4:E5:F6"/>
-            <Button Content="保存地址" Width="80" Margin="5,0,0,0" Click="SaveManualAddress_Click"/>
+                     ToolTip="可选，留空则自动扫描"/>
         </StackPanel>
-
         <TextBlock x:Name="TestResultText" Grid.Row="4" Text="" FontSize="12" Foreground="DarkGreen" Margin="0,0,0,5"/>
 
-        <!-- 扫描 -->
-        <Button Grid.Row="5" Content="扫描BLE设备" Height="30" VerticalAlignment="Top"
-                Margin="0,5,0,5" Click="ScanButton_Click"/>
-        <ListBox x:Name="DeviceListBox" Grid.Row="5" Height="120" Margin="0,45,0,5"
-                 SelectionChanged="DeviceListBox_SelectionChanged">
-            <ListBox.ItemTemplate>
-                <DataTemplate>
-                    <StackPanel Orientation="Horizontal">
-                        <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"/>
-                        <TextBlock Text=" (" />
-                        <TextBlock Text="{Binding Rssi, StringFormat='{}{0} dBm'}" Foreground="Gray"/>
-                        <TextBlock Text=")" />
-                    </StackPanel>
-                </DataTemplate>
-            </ListBox.ItemTemplate>
-        </ListBox>
+        <!-- 扫描区域 -->
+        <StackPanel Grid.Row="5" Margin="0,5,0,0">
+            <Button x:Name="ScanButton" Content="扫描候选设备" Height="30" Margin="0,0,0,5"
+                    Click="ScanButton_Click"/>
+            <ListBox x:Name="DeviceListBox" Height="120" SelectionChanged="DeviceListBox_SelectionChanged">
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"/>
+                            <TextBlock Text=" (" />
+                            <TextBlock Text="{Binding Rssi, StringFormat='{}{0} dBm'}" Foreground="Gray"/>
+                            <TextBlock Text=")" />
+                        </StackPanel>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+        </StackPanel>
 
-        <Button Grid.Row="6" Content="📝 记录当前RSSI值" Height="35" Margin="0,5" Click="RecordRssiButton_Click"/>
-        <TextBlock x:Name="LastRssiText" Grid.Row="7" Text="尚未记录" FontSize="12" Foreground="DimGray" TextWrapping="Wrap"/>
+        <!-- 记录RSSI -->
+        <Button Grid.Row="6" Content="📝 记录当前RSSI值" Height="32" Margin="0,10,0,5"
+                Click="RecordRssiButton_Click"/>
+        <TextBlock x:Name="LastRssiText" Grid.Row="7" Text="尚未记录"
+                   FontSize="12" Foreground="DimGray" TextWrapping="Wrap"/>
 
+        <!-- 保存/取消 -->
         <StackPanel Grid.Row="8" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
             <Button Content="保存设置" Width="100" Height="30" Click="SaveButton_Click"/>
             <Button Content="取消" Width="100" Height="30" Margin="10,0,0,0" Click="CancelButton_Click"/>
