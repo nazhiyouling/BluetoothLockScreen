@@ -9,7 +9,6 @@ using Microsoft.Win32;
 using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.Advertisement;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
-using Windows.Devices.Enumeration;
 
 namespace BluetoothLockScreen
 {
@@ -18,9 +17,6 @@ namespace BluetoothLockScreen
         [DllImport("user32.dll")]
         private static extern void LockWorkStation();
 
-        // 必须与手机端 BleAdvertiserService.DEVICE_NAME 完全一致
-        private const string ExpectedDeviceName = "Ghost-BLE-Anchor";
-
         private readonly Action<string> _updateStatus;
         private readonly Action<int> _updateRssi;
         private readonly Action<string> _updateDeviceName;
@@ -28,7 +24,6 @@ namespace BluetoothLockScreen
         private BluetoothLEDevice _device;
         private GattSession _session;
         private BluetoothLEAdvertisementWatcher _rssiWatcher;
-        private BluetoothLEAdvertisementWatcher _unlockScanWatcher;
         private int _rssiThreshold;
         private int _currentRssi = int.MinValue;
         private List<int> _rssiLog = new List<int>();
@@ -58,17 +53,36 @@ namespace BluetoothLockScreen
         private DateTime _lastPacketTime = DateTime.MinValue;
         private const int PacketTimeoutSeconds = 5;
 
+        // 当前期望的设备名称（可从设置界面修改）
+        private string _expectedDeviceName = "Ghost-BLE-Anchor";
+
         public BluetoothManager(Action<string> status, Action<int> rssi, Action<string> name)
         {
             _updateStatus = status;
             _updateRssi = rssi;
             _updateDeviceName = name;
             _rssiThreshold = ConfigManager.Default.RssiThreshold <= 0 ? ConfigManager.Default.RssiThreshold : -83;
+            _expectedDeviceName = string.IsNullOrWhiteSpace(ConfigManager.Default.ExpectedDeviceName)
+                ? "Ghost-BLE-Anchor"
+                : ConfigManager.Default.ExpectedDeviceName;
+
             _reconnectTimer = new Timer(ReconnectIntervalMs) { AutoReset = true };
             _reconnectTimer.Elapsed += OnReconnectTimer;
             Directory.CreateDirectory(DataFolder);
             File.WriteAllText(AppLogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} 程序启动\n");
             SystemEvents.SessionSwitch += OnSessionSwitch;
+        }
+
+        /// <summary>
+        /// 设置界面保存后调用，更新期望名称
+        /// </summary>
+        public void UpdateExpectedDeviceName(string name)
+        {
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                _expectedDeviceName = name;
+                Log($"期望设备名称已更新为: {name}");
+            }
         }
 
         private void Log(string msg)
@@ -80,15 +94,14 @@ namespace BluetoothLockScreen
 
         private bool IsExpectedDeviceName(string name)
         {
-            return string.Equals(name, ExpectedDeviceName, StringComparison.Ordinal);
+            return string.Equals(name, _expectedDeviceName, StringComparison.Ordinal);
         }
 
-        // ---------- UI 扫描（只列出 UUID/GUID 匹配的候选） ----------
+        // ---------- UI 扫描 ----------
         public async Task<List<BluetoothDeviceInfo>> ScanDevicesAsync()
         {
             Log("UI扫描：暂停后台监听");
             _rssiWatcher?.Stop();
-            _unlockScanWatcher?.Stop();
 
             var dict = new Dictionary<ulong, BluetoothDeviceInfo>();
             var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
@@ -125,7 +138,7 @@ namespace BluetoothLockScreen
             await tcs.Task;
 
             var devices = dict.Values.OrderByDescending(d => d.Rssi).ToList();
-            Log($"UI扫描完成，找到 {devices.Count} 个候选设备。连接后会校验名称是否为 {ExpectedDeviceName}");
+            Log($"UI扫描完成，找到 {devices.Count} 个候选设备。连接后会校验名称是否为 '{_expectedDeviceName}'");
 
             if (_isMonitoring && !string.IsNullOrEmpty(_deviceAddressStr))
             {
@@ -184,10 +197,7 @@ namespace BluetoothLockScreen
             return r;
         }
 
-        public async Task<int?> TestConnectionAsync(string addressHex)
-        {
-            return null;
-        }
+        public async Task<int?> TestConnectionAsync(string addressHex) => null;
 
         // ---------- 扫描候选地址 ----------
         private async Task<List<ulong>> DiscoverCandidatesAsync(int timeoutMs)
@@ -207,7 +217,7 @@ namespace BluetoothLockScreen
             return candidates.ToList();
         }
 
-        // ---------- 连接候选并校验设备名称 ----------
+        // ---------- 连接候选并校验名称 ----------
         private async Task<bool> TryConnectAndValidateAsync(ulong addr)
         {
             BluetoothLEDevice dev = null;
@@ -223,11 +233,11 @@ namespace BluetoothLockScreen
                 }
 
                 string actualName = dev.Name ?? "";
-                Log($"候选设备名称: '{actualName}'");
+                Log($"候选设备名称: '{actualName}'，期望: '{_expectedDeviceName}'");
 
                 if (!IsExpectedDeviceName(actualName))
                 {
-                    Log($"名称不匹配，拒绝连接（期望 {ExpectedDeviceName}）");
+                    Log("名称不匹配，拒绝连接");
                     dev.Dispose();
                     return false;
                 }
@@ -240,7 +250,6 @@ namespace BluetoothLockScreen
                     return false;
                 }
 
-                // 校验通过，正式接管
                 Cleanup();
                 _device = dev;
                 _session = sess;
@@ -249,13 +258,13 @@ namespace BluetoothLockScreen
                 _deviceAddressStr = addr.ToString("X12");
                 ConfigManager.Default.DeviceAddress = _deviceAddressStr;
                 ConfigManager.Save();
-                _updateDeviceName(ExpectedDeviceName);
+                _updateDeviceName(_expectedDeviceName);
                 StartRssiWatcher(addr);
                 _lastReconnectTime = DateTime.Now;
                 _lastPacketTime = DateTime.Now;
 
                 await ExtractDeviceGuid(addr);
-                Log($"连接并校验成功: {ExpectedDeviceName} ({addr:X12})");
+                Log($"连接并校验成功: {_expectedDeviceName} ({addr:X12})");
                 return true;
             }
             catch (Exception ex)
@@ -271,7 +280,7 @@ namespace BluetoothLockScreen
         private async Task ConnectToExpectedAnchor()
         {
             Cleanup();
-            _updateStatus("正在查找 Ghost-BLE-Anchor...");
+            _updateStatus($"正在查找 {_expectedDeviceName}...");
 
             while (true)
             {
@@ -346,14 +355,9 @@ namespace BluetoothLockScreen
                     _updateRssi(_currentRssi);
 
                     if (_currentRssi < _rssiThreshold)
-                    {
                         _lowRssiCount++;
-                        Log($"RSSI={_currentRssi} 低于阈值 (连续 {_lowRssiCount} 次)");
-                    }
                     else
-                    {
                         _lowRssiCount = 0;
-                    }
 
                     if (_lowRssiCount >= 3 &&
                         _isMonitoring &&
@@ -370,7 +374,7 @@ namespace BluetoothLockScreen
                         bool found = await QuickScanForExpectedDevice();
                         if (!found)
                         {
-                            Log("扫描2秒内未发现 Ghost-BLE-Anchor，执行锁屏");
+                            Log("扫描2秒内未发现目标设备，执行锁屏");
                             TryLockWorkStation();
                             _updateStatus("锁屏（设备离开）");
                         }
@@ -386,11 +390,9 @@ namespace BluetoothLockScreen
             _rssiWatcher.Start();
         }
 
-        // ---------- 快速扫描并校验名称 ----------
         private async Task<bool> QuickScanForExpectedDevice()
         {
             Cleanup();
-
             var candidates = await DiscoverCandidatesAsync(2000);
             if (candidates.Count == 0)
             {
@@ -412,8 +414,6 @@ namespace BluetoothLockScreen
         {
             _rssiWatcher?.Stop();
             _rssiWatcher = null;
-            _unlockScanWatcher?.Stop();
-            _unlockScanWatcher = null;
 
             if (_session != null)
             {
@@ -441,9 +441,7 @@ namespace BluetoothLockScreen
                 Log("系统解锁，启动立即重连...");
                 _isScreenLocked = false;
                 if (_isMonitoring)
-                {
                     _ = Task.Run(async () => await UnlockReconnect());
-                }
             }
         }
 
@@ -474,7 +472,7 @@ namespace BluetoothLockScreen
             }
         }
 
-        // ---------- 定时器：连续断开 + 看门狗 ----------
+        // ---------- 定时器 ----------
         private async void OnReconnectTimer(object sender, ElapsedEventArgs e)
         {
             if (_isReconnecting || !_isMonitoring || _isScreenLocked || _isQuickScanning)
@@ -543,7 +541,6 @@ namespace BluetoothLockScreen
             }
         }
 
-        // ---------- GATT 关闭 ----------
         private void OnSessionClosed(GattSession sender, GattSessionStatusChangedEventArgs args)
         {
             if (args.Status != GattSessionStatus.Closed)
@@ -559,7 +556,6 @@ namespace BluetoothLockScreen
             TryLockWorkStation();
         }
 
-        // ---------- 锁屏冷却 ----------
         private void TryLockWorkStation()
         {
             if ((DateTime.Now - _lastLockTime).TotalSeconds < 5)
