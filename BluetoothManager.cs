@@ -53,7 +53,6 @@ namespace BluetoothLockScreen
         private DateTime _lastPacketTime = DateTime.MinValue;
         private const int PacketTimeoutSeconds = 5;
 
-        // 当前期望的设备名称（可从设置界面修改）
         private string _expectedDeviceName = "Ghost-BLE-Anchor";
 
         public BluetoothManager(Action<string> status, Action<int> rssi, Action<string> name)
@@ -73,9 +72,6 @@ namespace BluetoothLockScreen
             SystemEvents.SessionSwitch += OnSessionSwitch;
         }
 
-        /// <summary>
-        /// 设置界面保存后调用，更新期望名称
-        /// </summary>
         public void UpdateExpectedDeviceName(string name)
         {
             if (!string.IsNullOrWhiteSpace(name))
@@ -112,10 +108,10 @@ namespace BluetoothLockScreen
                                    || e.Advertisement.ServiceUuids.Contains(OurServiceUuid);
                 if (!isCandidate) return;
 
-                string name = string.IsNullOrEmpty(e.Advertisement.LocalName)
-                    ? "候选设备"
-                    : e.Advertisement.LocalName;
-                string displayName = $"{name} ({e.BluetoothAddress:X12})";
+                string scanName = e.Advertisement.LocalName ?? "";
+                string displayName = string.IsNullOrEmpty(scanName)
+                    ? $"未命名 ({e.BluetoothAddress:X12})"
+                    : $"{scanName} ({e.BluetoothAddress:X12})";
 
                 if (!dict.ContainsKey(e.BluetoothAddress))
                 {
@@ -129,6 +125,8 @@ namespace BluetoothLockScreen
                 else
                 {
                     dict[e.BluetoothAddress].Rssi = e.RawSignalStrengthInDBm;
+                    if (!string.IsNullOrEmpty(scanName))
+                        dict[e.BluetoothAddress].DisplayName = displayName;
                 }
             };
             watcher.Stopped += (s, e) => tcs.TrySetResult(true);
@@ -138,7 +136,7 @@ namespace BluetoothLockScreen
             await tcs.Task;
 
             var devices = dict.Values.OrderByDescending(d => d.Rssi).ToList();
-            Log($"UI扫描完成，找到 {devices.Count} 个候选设备。连接后会校验名称是否为 '{_expectedDeviceName}'");
+            Log($"UI扫描完成，找到 {devices.Count} 个候选设备（期望名称: {_expectedDeviceName}）");
 
             if (_isMonitoring && !string.IsNullOrEmpty(_deviceAddressStr))
             {
@@ -199,32 +197,42 @@ namespace BluetoothLockScreen
 
         public async Task<int?> TestConnectionAsync(string addressHex) => null;
 
-        // ---------- 扫描候选地址 ----------
-        private async Task<List<ulong>> DiscoverCandidatesAsync(int timeoutMs)
+        // ---------- 扫描候选设备（地址 + 扫描名称） ----------
+        private async Task<List<(ulong Address, string Name)>> DiscoverCandidatesAsync(int timeoutMs)
         {
-            var candidates = new HashSet<ulong>();
+            var candidates = new Dictionary<ulong, string>();
             var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
             watcher.Received += (s, e) =>
             {
                 bool isCandidate = (_deviceGuid != Guid.Empty && e.Advertisement.ServiceUuids.Contains(_deviceGuid))
                                    || e.Advertisement.ServiceUuids.Contains(OurServiceUuid);
-                if (isCandidate)
-                    candidates.Add(e.BluetoothAddress);
+                if (!isCandidate) return;
+
+                string name = e.Advertisement.LocalName ?? "";
+                if (!candidates.ContainsKey(e.BluetoothAddress) || string.IsNullOrEmpty(candidates[e.BluetoothAddress]))
+                    candidates[e.BluetoothAddress] = name;
             };
             watcher.Start();
             await Task.Delay(timeoutMs);
             watcher.Stop();
-            return candidates.ToList();
+            return candidates.Select(kv => (kv.Key, kv.Value)).ToList();
         }
 
         // ---------- 连接候选并校验名称 ----------
-        private async Task<bool> TryConnectAndValidateAsync(ulong addr)
+        private async Task<bool> TryConnectAndValidateAsync(ulong addr, string scannedName)
         {
+            // 扫描名称已知且不匹配时，直接跳过
+            if (!string.IsNullOrEmpty(scannedName) && !IsExpectedDeviceName(scannedName))
+            {
+                Log($"扫描名称不匹配: '{scannedName}'，跳过地址 {addr:X12}");
+                return false;
+            }
+
             BluetoothLEDevice dev = null;
             GattSession sess = null;
             try
             {
-                Log($"尝试连接候选: {addr:X12}");
+                Log($"尝试连接候选: {addr:X12}，扫描名称: '{(string.IsNullOrEmpty(scannedName) ? "无" : scannedName)}'");
                 dev = await BluetoothLEDevice.FromBluetoothAddressAsync(addr);
                 if (dev == null)
                 {
@@ -232,12 +240,21 @@ namespace BluetoothLockScreen
                     return false;
                 }
 
-                string actualName = dev.Name ?? "";
-                Log($"候选设备名称: '{actualName}'，期望: '{_expectedDeviceName}'");
+                // 连接后通过 GATT 读取真实名称（比 dev.Name 更可靠）
+                string actualName = await ReadGattDeviceNameAsync(dev);
+                if (string.IsNullOrEmpty(actualName))
+                {
+                    actualName = dev.Name ?? "";
+                    Log($"GATT名称读取失败，回退到 dev.Name: '{actualName}'");
+                }
+                else
+                {
+                    Log($"GATT读取名称: '{actualName}'");
+                }
 
                 if (!IsExpectedDeviceName(actualName))
                 {
-                    Log("名称不匹配，拒绝连接");
+                    Log($"名称不匹配（期望 '{_expectedDeviceName}'，实际 '{actualName}'），拒绝连接");
                     dev.Dispose();
                     return false;
                 }
@@ -276,6 +293,42 @@ namespace BluetoothLockScreen
             }
         }
 
+        /// <summary>
+        /// 通过 GATT 读取标准设备名称特征（0x2A00）
+        /// </summary>
+        private async Task<string> ReadGattDeviceNameAsync(BluetoothLEDevice device)
+        {
+            try
+            {
+                var servicesResult = await device.GetGattServicesAsync();
+                if (servicesResult.Status != GattCommunicationStatus.Success)
+                    return null;
+
+                var genericAccess = servicesResult.Services
+                    .FirstOrDefault(s => s.Uuid == Guid.Parse("00001800-0000-1000-8000-00805F9B34FB"));
+                if (genericAccess == null) return null;
+
+                var charsResult = await genericAccess.GetCharacteristicsAsync();
+                if (charsResult.Status != GattCommunicationStatus.Success)
+                    return null;
+
+                var nameChar = charsResult.Characteristics
+                    .FirstOrDefault(c => c.Uuid == Guid.Parse("00002A00-0000-1000-8000-00805F9B34FB"));
+                if (nameChar == null) return null;
+
+                var readResult = await nameChar.ReadValueAsync();
+                if (readResult.Status != GattCommunicationStatus.Success)
+                    return null;
+
+                var reader = Windows.Storage.Streams.DataReader.FromBuffer(readResult.Value);
+                return reader.ReadString(readResult.Value.Length);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         // ---------- 持续扫描直到找到正确名称的设备 ----------
         private async Task ConnectToExpectedAnchor()
         {
@@ -292,13 +345,13 @@ namespace BluetoothLockScreen
                     continue;
                 }
 
-                foreach (ulong addr in candidates)
+                foreach (var candidate in candidates)
                 {
-                    if (await TryConnectAndValidateAsync(addr))
+                    if (await TryConnectAndValidateAsync(candidate.Address, candidate.Name))
                         return;
                 }
 
-                Log("本轮候选设备名称均不匹配，继续扫描...");
+                Log("本轮候选设备均未通过校验，继续扫描...");
                 await Task.Delay(500);
             }
         }
@@ -400,13 +453,13 @@ namespace BluetoothLockScreen
                 return false;
             }
 
-            foreach (ulong addr in candidates)
+            foreach (var candidate in candidates)
             {
-                if (await TryConnectAndValidateAsync(addr))
+                if (await TryConnectAndValidateAsync(candidate.Address, candidate.Name))
                     return true;
             }
 
-            Log("快速扫描候选设备均名称不匹配");
+            Log("快速扫描候选设备均未通过校验");
             return false;
         }
 
