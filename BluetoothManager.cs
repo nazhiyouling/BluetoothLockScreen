@@ -26,20 +26,24 @@ namespace BluetoothLockScreen
         private BluetoothLEAdvertisementWatcher _rssiWatcher;
         private int _rssiThreshold;
         private int _currentRssi = int.MinValue;
-        private List<int> _rssiLog = new List<int>();
 
         private bool _isMonitoring = false;
         private string _deviceAddressStr;
         private Timer _reconnectTimer;
         private bool _isReconnecting = false;
         private bool _isQuickScanning = false;
-        private const int ReconnectIntervalMs = 2000;
 
-        private DateTime _lastQuickScanTime = DateTime.MinValue;
-        private const int QuickScanCooldownSeconds = 30;
+        // 可配置时间参数
+        private int _lowRssiCountThreshold;
+        private TimeSpan _quickScanCooldown;
+        private TimeSpan _quickScanTimeout;
+        private TimeSpan _reconnectInterval;
+        private int _disconnectCountThreshold;
+        private TimeSpan _packetTimeout;
+        private TimeSpan _gattGrace;
+        private TimeSpan _lockCooldown;
 
         private static readonly string DataFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data");
-        private static readonly string RssiLogPath = Path.Combine(DataFolder, "rssi_log.txt");
         private static readonly string AppLogPath = Path.Combine(DataFolder, "app_log.txt");
         private static readonly Guid OurServiceUuid = Guid.Parse("0000ABCD-0000-1000-8000-00805F9B34FB");
 
@@ -47,11 +51,10 @@ namespace BluetoothLockScreen
         private bool _isScreenLocked = false;
         private DateTime _lastLockTime = DateTime.MinValue;
         private DateTime _lastReconnectTime = DateTime.MinValue;
+        private DateTime _lastQuickScanTime = DateTime.MinValue;
         private int _lowRssiCount = 0;
         private int _disconnectCount = 0;
-
         private DateTime _lastPacketTime = DateTime.MinValue;
-        private const int PacketTimeoutSeconds = 5;
 
         private string _expectedDeviceName = "";
 
@@ -60,16 +63,80 @@ namespace BluetoothLockScreen
             _updateStatus = status;
             _updateRssi = rssi;
             _updateDeviceName = name;
-            _rssiThreshold = ConfigManager.Default.RssiThreshold <= 0 ? ConfigManager.Default.RssiThreshold : -83;
-            _expectedDeviceName = ConfigManager.Default.ExpectedDeviceName?.Trim() ?? "";
-            if (!string.IsNullOrEmpty(ConfigManager.Default.DeviceGuid))
-                _deviceGuid = Guid.Parse(ConfigManager.Default.DeviceGuid);
 
-            _reconnectTimer = new Timer(ReconnectIntervalMs) { AutoReset = true };
+            LoadSettingsFromConfig();
+
+            _reconnectTimer = new Timer(_reconnectInterval.TotalMilliseconds) { AutoReset = true };
             _reconnectTimer.Elapsed += OnReconnectTimer;
+
             Directory.CreateDirectory(DataFolder);
             File.WriteAllText(AppLogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} 程序启动\n");
             SystemEvents.SessionSwitch += OnSessionSwitch;
+        }
+
+        private void LoadSettingsFromConfig()
+        {
+            var cfg = ConfigManager.Default;
+
+            _rssiThreshold = cfg.RssiThreshold <= 0 ? cfg.RssiThreshold : -83;
+            _expectedDeviceName = cfg.ExpectedDeviceName?.Trim() ?? "";
+
+            _lowRssiCountThreshold = Clamp(cfg.LowRssiCount, 1, 10, 3);
+            _quickScanCooldown = TimeSpan.FromSeconds(Clamp(cfg.QuickScanCooldownSec, 1, 300, 30));
+            _quickScanTimeout = TimeSpan.FromSeconds(Clamp(cfg.QuickScanTimeoutSec, 1, 300, 2));
+            _reconnectInterval = TimeSpan.FromSeconds(Clamp(cfg.ReconnectIntervalSec, 1, 300, 2));
+            _disconnectCountThreshold = Clamp(cfg.DisconnectCount, 1, 10, 2);
+            _packetTimeout = TimeSpan.FromSeconds(Clamp(cfg.PacketTimeoutSec, 1, 300, 5));
+            _gattGrace = TimeSpan.FromSeconds(Clamp(cfg.GattGraceSec, 1, 300, 5));
+            _lockCooldown = TimeSpan.FromSeconds(Clamp(cfg.LockCooldownSec, 1, 300, 5));
+
+            if (!string.IsNullOrEmpty(cfg.DeviceGuid))
+            {
+                try { _deviceGuid = Guid.Parse(cfg.DeviceGuid); }
+                catch { _deviceGuid = Guid.Empty; }
+            }
+        }
+
+        private static int Clamp(int value, int min, int max, int defaultValue)
+        {
+            if (value < min || value > max) return defaultValue;
+            return value;
+        }
+
+        /// <summary>
+        /// 设置界面保存后调用，热更新所有参数
+        /// </summary>
+        public void UpdateSettings(
+            int rssiThreshold,
+            string expectedName,
+            int lowRssiCount,
+            int quickScanCooldownSec,
+            int quickScanTimeoutSec,
+            int reconnectIntervalSec,
+            int disconnectCount,
+            int packetTimeoutSec,
+            int gattGraceSec,
+            int lockCooldownSec)
+        {
+            _rssiThreshold = rssiThreshold;
+            _expectedDeviceName = expectedName?.Trim() ?? "";
+            _lowRssiCountThreshold = Clamp(lowRssiCount, 1, 10, 3);
+            _quickScanCooldown = TimeSpan.FromSeconds(Clamp(quickScanCooldownSec, 1, 300, 30));
+            _quickScanTimeout = TimeSpan.FromSeconds(Clamp(quickScanTimeoutSec, 1, 300, 2));
+            _reconnectInterval = TimeSpan.FromSeconds(Clamp(reconnectIntervalSec, 1, 300, 2));
+            _disconnectCountThreshold = Clamp(disconnectCount, 1, 10, 2);
+            _packetTimeout = TimeSpan.FromSeconds(Clamp(packetTimeoutSec, 1, 300, 5));
+            _gattGrace = TimeSpan.FromSeconds(Clamp(gattGraceSec, 1, 300, 5));
+            _lockCooldown = TimeSpan.FromSeconds(Clamp(lockCooldownSec, 1, 300, 5));
+
+            if (_reconnectTimer != null)
+                _reconnectTimer.Interval = _reconnectInterval.TotalMilliseconds;
+
+            Log($"设置已更新：RSSI={_rssiThreshold}, 名称='{_expectedDeviceName}', " +
+                $"低RSSI次数={_lowRssiCountThreshold}, 扫描冷却={_quickScanCooldown.TotalSeconds}s, " +
+                $"扫描超时={_quickScanTimeout.TotalSeconds}s, 重连间隔={_reconnectInterval.TotalSeconds}s, " +
+                $"断开次数={_disconnectCountThreshold}, 看门狗={_packetTimeout.TotalSeconds}s, " +
+                $"GATT宽限={_gattGrace.TotalSeconds}s, 锁屏冷却={_lockCooldown.TotalSeconds}s");
         }
 
         public void UpdateExpectedDeviceName(string name)
@@ -98,8 +165,7 @@ namespace BluetoothLockScreen
             var tcs = new TaskCompletionSource<bool>();
             watcher.Received += (s, e) =>
             {
-                bool isCandidate = IsOurService(e.Advertisement);
-                if (!isCandidate) return;
+                if (!IsOurService(e.Advertisement)) return;
 
                 string scanName = e.Advertisement.LocalName ?? "";
                 string displayName = string.IsNullOrEmpty(scanName)
@@ -195,14 +261,6 @@ namespace BluetoothLockScreen
 
         public void UpdateThreshold(int t) => _rssiThreshold = t;
 
-        public int RecordAndGetRssi()
-        {
-            int r = _currentRssi;
-            lock (_rssiLog) _rssiLog.Add(r);
-            AppendRssi(r);
-            return r;
-        }
-
         public async Task<int?> TestConnectionAsync(string addressHex) => null;
 
         // ---------- 扫描候选 ----------
@@ -234,7 +292,6 @@ namespace BluetoothLockScreen
         // ---------- 连接候选 ----------
         private async Task<bool> TryConnectAsync(ulong addr, string scannedName, bool hasGuid)
         {
-            // 若已保存 GUID，则只接受携带该 GUID 的设备（名称不参与判断）
             if (_deviceGuid != Guid.Empty)
             {
                 if (!hasGuid)
@@ -245,7 +302,6 @@ namespace BluetoothLockScreen
             }
             else
             {
-                // 首次配置：按名称过滤
                 if (!string.IsNullOrEmpty(scannedName) &&
                     !string.IsNullOrEmpty(_expectedDeviceName) &&
                     !string.Equals(scannedName, _expectedDeviceName, StringComparison.Ordinal))
@@ -276,7 +332,6 @@ namespace BluetoothLockScreen
                     Log($"GATT/系统读取名称: '{actualName}'");
                 }
 
-                // 首次配置时校验名称
                 if (_deviceGuid == Guid.Empty &&
                     !string.IsNullOrEmpty(_expectedDeviceName) &&
                     !string.Equals(actualName, _expectedDeviceName, StringComparison.Ordinal))
@@ -307,7 +362,6 @@ namespace BluetoothLockScreen
                 _lastReconnectTime = DateTime.Now;
                 _lastPacketTime = DateTime.Now;
 
-                // 首次连接成功后提取并保存 GUID
                 if (_deviceGuid == Guid.Empty)
                     await ExtractDeviceGuid(addr);
 
@@ -427,13 +481,16 @@ namespace BluetoothLockScreen
                     if (_currentRssi < _rssiThreshold) _lowRssiCount++;
                     else _lowRssiCount = 0;
 
-                    if (_lowRssiCount >= 3 && _isMonitoring && !_isScreenLocked && !_isQuickScanning &&
-                        (DateTime.Now - _lastQuickScanTime).TotalSeconds >= QuickScanCooldownSeconds)
+                    if (_lowRssiCount >= _lowRssiCountThreshold &&
+                        _isMonitoring &&
+                        !_isScreenLocked &&
+                        !_isQuickScanning &&
+                        (DateTime.Now - _lastQuickScanTime) >= _quickScanCooldown)
                     {
                         _lowRssiCount = 0;
                         _isQuickScanning = true;
                         _lastQuickScanTime = DateTime.Now;
-                        Log("连续3次低RSSI，扫描确认设备...");
+                        Log($"连续{_lowRssiCountThreshold}次低RSSI，扫描确认设备...");
                         _updateStatus("信号弱，确认设备...");
 
                         bool found = await QuickScanForExpectedDevice();
@@ -458,7 +515,7 @@ namespace BluetoothLockScreen
         private async Task<bool> QuickScanForExpectedDevice()
         {
             Cleanup();
-            var candidates = await DiscoverCandidatesAsync(2000);
+            var candidates = await DiscoverCandidatesAsync((int)_quickScanTimeout.TotalMilliseconds);
             if (candidates.Count == 0)
             {
                 Log("快速扫描无候选");
@@ -538,11 +595,11 @@ namespace BluetoothLockScreen
             {
                 _disconnectCount++;
                 Log($"定时器检测到断开 (连续 {_disconnectCount} 次)");
-                if (_disconnectCount >= 2)
+                if (_disconnectCount >= _disconnectCountThreshold)
                 {
                     _disconnectCount = 0;
                     _isReconnecting = true;
-                    Log("连续2次断开，启动重连...");
+                    Log($"连续{_disconnectCountThreshold}次断开，启动重连...");
                     _updateStatus("重连中...");
                     try
                     {
@@ -564,9 +621,9 @@ namespace BluetoothLockScreen
                 }
             }
 
-            if (!_isScreenLocked && (DateTime.Now - _lastPacketTime).TotalSeconds > PacketTimeoutSeconds)
+            if (!_isScreenLocked && (DateTime.Now - _lastPacketTime) > _packetTimeout)
             {
-                Log($"看门狗触发：{PacketTimeoutSeconds}秒无RSSI包，扫描确认");
+                Log($"看门狗触发：{_packetTimeout.TotalSeconds}秒无RSSI包，扫描确认");
                 _isQuickScanning = true;
                 _lastQuickScanTime = DateTime.Now;
                 bool found = await QuickScanForExpectedDevice();
@@ -589,7 +646,7 @@ namespace BluetoothLockScreen
         {
             if (args.Status != GattSessionStatus.Closed) return;
 
-            if ((DateTime.Now - _lastReconnectTime).TotalSeconds < 5)
+            if ((DateTime.Now - _lastReconnectTime) < _gattGrace)
             {
                 Log("GATT关闭忽略（宽限期内）");
                 return;
@@ -601,18 +658,13 @@ namespace BluetoothLockScreen
 
         private void TryLockWorkStation()
         {
-            if ((DateTime.Now - _lastLockTime).TotalSeconds < 5)
+            if ((DateTime.Now - _lastLockTime) < _lockCooldown)
             {
                 Log("锁屏冷却中，跳过");
                 return;
             }
             _lastLockTime = DateTime.Now;
             LockWorkStation();
-        }
-
-        private void AppendRssi(int rssi)
-        {
-            try { File.AppendAllText(RssiLogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - {rssi} dBm\n"); } catch { }
         }
 
         public void Dispose()
