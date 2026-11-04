@@ -53,7 +53,7 @@ namespace BluetoothLockScreen
         private DateTime _lastPacketTime = DateTime.MinValue;
         private const int PacketTimeoutSeconds = 5;
 
-        private string _expectedDeviceName = "Ghost-BLE-Anchor";
+        private string _expectedDeviceName = "";
 
         public BluetoothManager(Action<string> status, Action<int> rssi, Action<string> name)
         {
@@ -61,9 +61,7 @@ namespace BluetoothLockScreen
             _updateRssi = rssi;
             _updateDeviceName = name;
             _rssiThreshold = ConfigManager.Default.RssiThreshold <= 0 ? ConfigManager.Default.RssiThreshold : -83;
-            _expectedDeviceName = string.IsNullOrWhiteSpace(ConfigManager.Default.ExpectedDeviceName)
-                ? "Ghost-BLE-Anchor"
-                : ConfigManager.Default.ExpectedDeviceName;
+            _expectedDeviceName = ConfigManager.Default.ExpectedDeviceName?.Trim() ?? "";
 
             _reconnectTimer = new Timer(ReconnectIntervalMs) { AutoReset = true };
             _reconnectTimer.Elapsed += OnReconnectTimer;
@@ -72,14 +70,19 @@ namespace BluetoothLockScreen
             SystemEvents.SessionSwitch += OnSessionSwitch;
         }
 
+        /// <summary>
+        /// 设置界面保存后调用，更新期望名称（下次启动生效）
+        /// </summary>
         public void UpdateExpectedDeviceName(string name)
         {
-            if (!string.IsNullOrWhiteSpace(name))
-            {
-                _expectedDeviceName = name;
-                Log($"期望设备名称已更新为: {name}");
-            }
+            _expectedDeviceName = name?.Trim() ?? "";
+            Log($"期望设备名称已更新为: '{(string.IsNullOrEmpty(_expectedDeviceName) ? "(空)" : _expectedDeviceName)}'");
         }
+
+        /// <summary>
+        /// 当前是否已配置期望设备名称
+        /// </summary>
+        public bool HasExpectedDeviceName => !string.IsNullOrEmpty(_expectedDeviceName);
 
         private void Log(string msg)
         {
@@ -90,6 +93,8 @@ namespace BluetoothLockScreen
 
         private bool IsExpectedDeviceName(string name)
         {
+            if (string.IsNullOrEmpty(_expectedDeviceName))
+                return true;
             return string.Equals(name, _expectedDeviceName, StringComparison.Ordinal);
         }
 
@@ -136,7 +141,7 @@ namespace BluetoothLockScreen
             await tcs.Task;
 
             var devices = dict.Values.OrderByDescending(d => d.Rssi).ToList();
-            Log($"UI扫描完成，找到 {devices.Count} 个候选设备（期望名称: {_expectedDeviceName}）");
+            Log($"UI扫描完成，找到 {devices.Count} 个候选设备（期望名称: '{(string.IsNullOrEmpty(_expectedDeviceName) ? "(空)" : _expectedDeviceName)}'）");
 
             if (_isMonitoring && !string.IsNullOrEmpty(_deviceAddressStr))
             {
@@ -151,10 +156,18 @@ namespace BluetoothLockScreen
             return new List<BluetoothDeviceInfo>();
         }
 
-        // ---------- 监控启动 ----------
-        public async Task AutoConnectAndMonitorAsync()
+        // ---------- 自动连接（名称为空则跳过） ----------
+        public async Task<bool> AutoConnectAndMonitorAsync()
         {
-            if (_isMonitoring) return;
+            if (_isMonitoring) return true;
+
+            if (string.IsNullOrEmpty(_expectedDeviceName))
+            {
+                Log("期望设备名称为空，跳过自动连接。请先在设置中填写设备名称。");
+                _updateStatus("未配置设备名称，请先在设置中填写");
+                return false;
+            }
+
             if (!string.IsNullOrEmpty(ConfigManager.Default.DeviceGuid))
                 _deviceGuid = Guid.Parse(ConfigManager.Default.DeviceGuid);
 
@@ -162,11 +175,20 @@ namespace BluetoothLockScreen
             _isMonitoring = true;
             _reconnectTimer.Start();
             _updateStatus("监控中...");
+            return true;
         }
 
-        public async Task StartMonitoringAsync(string addressHex)
+        // ---------- 手动启动监控（名称为空则拒绝） ----------
+        public async Task<bool> StartMonitoringAsync(string addressHex)
         {
-            if (_isMonitoring) return;
+            if (_isMonitoring) return true;
+
+            if (string.IsNullOrEmpty(_expectedDeviceName))
+            {
+                Log("手动启动失败：期望设备名称为空");
+                return false;
+            }
+
             if (!string.IsNullOrEmpty(ConfigManager.Default.DeviceGuid))
                 _deviceGuid = Guid.Parse(ConfigManager.Default.DeviceGuid);
 
@@ -174,6 +196,7 @@ namespace BluetoothLockScreen
             _isMonitoring = true;
             _reconnectTimer.Start();
             _updateStatus("监控中...");
+            return true;
         }
 
         public void StopMonitoring()
@@ -197,7 +220,7 @@ namespace BluetoothLockScreen
 
         public async Task<int?> TestConnectionAsync(string addressHex) => null;
 
-        // ---------- 扫描候选设备（地址 + 扫描名称） ----------
+        // ---------- 扫描候选设备 ----------
         private async Task<List<(ulong Address, string Name)>> DiscoverCandidatesAsync(int timeoutMs)
         {
             var candidates = new Dictionary<ulong, string>();
@@ -221,7 +244,6 @@ namespace BluetoothLockScreen
         // ---------- 连接候选并校验名称 ----------
         private async Task<bool> TryConnectAndValidateAsync(ulong addr, string scannedName)
         {
-            // 扫描名称已知且不匹配时，直接跳过
             if (!string.IsNullOrEmpty(scannedName) && !IsExpectedDeviceName(scannedName))
             {
                 Log($"扫描名称不匹配: '{scannedName}'，跳过地址 {addr:X12}");
@@ -240,16 +262,19 @@ namespace BluetoothLockScreen
                     return false;
                 }
 
-                // 连接后通过 GATT 读取真实名称（比 dev.Name 更可靠）
-                string actualName = await ReadGattDeviceNameAsync(dev);
+                string actualName = scannedName;
                 if (string.IsNullOrEmpty(actualName))
                 {
-                    actualName = dev.Name ?? "";
-                    Log($"GATT名称读取失败，回退到 dev.Name: '{actualName}'");
-                }
-                else
-                {
-                    Log($"GATT读取名称: '{actualName}'");
+                    actualName = await ReadGattDeviceNameAsync(dev);
+                    if (string.IsNullOrEmpty(actualName))
+                    {
+                        actualName = dev.Name ?? "";
+                        Log($"GATT名称读取失败，回退到 dev.Name: '{actualName}'");
+                    }
+                    else
+                    {
+                        Log($"GATT读取名称: '{actualName}'");
+                    }
                 }
 
                 if (!IsExpectedDeviceName(actualName))
@@ -275,13 +300,13 @@ namespace BluetoothLockScreen
                 _deviceAddressStr = addr.ToString("X12");
                 ConfigManager.Default.DeviceAddress = _deviceAddressStr;
                 ConfigManager.Save();
-                _updateDeviceName(_expectedDeviceName);
+                _updateDeviceName(string.IsNullOrEmpty(actualName) ? "未知设备" : actualName);
                 StartRssiWatcher(addr);
                 _lastReconnectTime = DateTime.Now;
                 _lastPacketTime = DateTime.Now;
 
                 await ExtractDeviceGuid(addr);
-                Log($"连接并校验成功: {_expectedDeviceName} ({addr:X12})");
+                Log($"连接并校验成功: {(string.IsNullOrEmpty(actualName) ? addr.ToString("X12") : actualName)} ({addr:X12})");
                 return true;
             }
             catch (Exception ex)
@@ -293,9 +318,6 @@ namespace BluetoothLockScreen
             }
         }
 
-        /// <summary>
-        /// 通过 GATT 读取标准设备名称特征（0x2A00）
-        /// </summary>
         private async Task<string> ReadGattDeviceNameAsync(BluetoothLEDevice device)
         {
             try
@@ -329,7 +351,7 @@ namespace BluetoothLockScreen
             }
         }
 
-        // ---------- 持续扫描直到找到正确名称的设备 ----------
+        // ---------- 持续扫描直到找到目标设备 ----------
         private async Task ConnectToExpectedAnchor()
         {
             Cleanup();
