@@ -15,13 +15,12 @@ namespace BluetoothLockScreen
         private bool _isMonitoring = false;
         private NotifyIcon _notifyIcon;
         private bool _forceExit = false;
-        private bool _isAutoStarting = true;   // 标记是否为自动启动（首次加载）
+        private bool _isAutoStarting = true;
 
         public MainWindow()
         {
             InitializeComponent();
 
-            // 动态版本号
             var ver = Assembly.GetExecutingAssembly().GetName().Version;
             Title = $"蓝牙锁屏监控 V{ver.Major}.{ver.Minor:D2}.{ver.Build:D2}" +
                     (ver.Revision > 0 ? $".{ver.Revision:D4}" : "");
@@ -39,29 +38,47 @@ namespace BluetoothLockScreen
                 Topmost = true;
                 Topmost = false;
 
-                // 启动时自动扫描并连接 BLE-Anchor，静默处理异常
-                try
+                // 首次启动：如果期望名称为空，不自动连接
+                if (string.IsNullOrEmpty(ConfigManager.Default.ExpectedDeviceName?.Trim()))
                 {
-                    await _btManager.AutoConnectAndMonitorAsync();
-                    _isMonitoring = true;
-                    StartStopButton.Content = "⏹\n停止监控";
-                    StartStopButton.Background = new SolidColorBrush(Colors.IndianRed);
-                    StartStopButton.Foreground = new SolidColorBrush(Colors.White);
+                    StatusText.Text = "请先在设置中填写期望设备名称";
+                    DeviceNameText.Text = "未配置";
+                    _isMonitoring = false;
+                    StartStopButton.Content = "▶\n开始监控";
+                    StartStopButton.Background = new SolidColorBrush(Colors.LightGreen);
+                    StartStopButton.Foreground = new SolidColorBrush(Colors.Black);
                 }
-                catch (Exception ex)
+                else
                 {
-                    System.Diagnostics.Debug.WriteLine("自动连接失败: " + ex.Message);
-                    // 不弹窗，仅记录日志
-                }
-                finally
-                {
-                    // 无论连接是否成功，都隐藏窗口并显示托盘图标（仅自动启动时）
-                    if (_isAutoStarting && _notifyIcon != null)
+                    try
                     {
-                        Hide();
-                        _notifyIcon.Visible = true;
-                        _isAutoStarting = false;  // 后续手动操作不再自动隐藏
+                        bool started = await _btManager.AutoConnectAndMonitorAsync();
+                        if (started)
+                        {
+                            _isMonitoring = true;
+                            StartStopButton.Content = "⏹\n停止监控";
+                            StartStopButton.Background = new SolidColorBrush(Colors.IndianRed);
+                            StartStopButton.Foreground = new SolidColorBrush(Colors.White);
+                        }
+                        else
+                        {
+                            StatusText.Text = "未配置设备名称，请先在设置中填写";
+                            _isMonitoring = false;
+                        }
                     }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine("自动连接失败: " + ex.Message);
+                        StatusText.Text = "自动连接失败，请检查设置";
+                    }
+                }
+
+                // 自动隐藏到托盘
+                if (_isAutoStarting && _notifyIcon != null)
+                {
+                    Hide();
+                    _notifyIcon.Visible = true;
+                    _isAutoStarting = false;
                 }
             };
         }
@@ -135,14 +152,25 @@ namespace BluetoothLockScreen
         {
             if (!_isMonitoring)
             {
-                // 手动开始监控：尝试使用已保存地址或自动扫描
-                string addr = ConfigManager.Default.DeviceAddress;
+                if (string.IsNullOrEmpty(ConfigManager.Default.ExpectedDeviceName?.Trim()))
+                {
+                    System.Windows.MessageBox.Show(
+                        "请先在设置中填写期望设备名称，再开始监控。",
+                        "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+                    return;
+                }
+
                 try
                 {
-                    if (!string.IsNullOrWhiteSpace(addr))
-                        await _btManager.StartMonitoringAsync(addr);
-                    else
-                        await _btManager.AutoConnectAndMonitorAsync();
+                    string addr = ConfigManager.Default.DeviceAddress;
+                    bool started = await _btManager.StartMonitoringAsync(addr);
+                    if (!started)
+                    {
+                        System.Windows.MessageBox.Show(
+                            "启动失败：期望设备名称为空，请先在设置中填写。",
+                            "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        return;
+                    }
 
                     _isMonitoring = true;
                     StartStopButton.Content = "⏹\n停止监控";
@@ -168,7 +196,15 @@ namespace BluetoothLockScreen
 
         private void SettingsButton_Click(object sender, RoutedEventArgs e)
         {
-            new SettingsWindow(_btManager) { Owner = this }.ShowDialog();
+            var dlg = new SettingsWindow(_btManager) { Owner = this };
+            dlg.ShowDialog();
+
+            // 保存后如果名称为空，更新界面提示
+            if (string.IsNullOrEmpty(ConfigManager.Default.ExpectedDeviceName?.Trim()))
+            {
+                StatusText.Text = "请先在设置中填写期望设备名称";
+                DeviceNameText.Text = "未配置";
+            }
         }
     }
 }
