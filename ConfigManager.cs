@@ -46,10 +46,21 @@ namespace BluetoothLockScreen
 
     public class ConfigData
     {
+        // 基础
         public string DeviceAddress { get; set; } = "";
         public string DeviceName { get; set; } = "";
         public int RssiThreshold { get; set; } = -83;
         public string DeviceGuid { get; set; } = "";
-        public string ExpectedDeviceName { get; set; } = "Ghost-BLE-Anchor";
+        public string ExpectedDeviceName { get; set; } = "";
+
+        // 高级时间参数（单位：秒，次数单位：次）
+        public int LowRssiCount { get; set; } = 3;              // 连续低 RSSI 次数
+        public int QuickScanCooldownSec { get; set; } = 30;     // 快速扫描冷却
+        public int QuickScanTimeoutSec { get; set; } = 2;       // 快速扫描超时
+        public int ReconnectIntervalSec { get; set; } = 2;      // 重连定时器间隔
+        public int DisconnectCount { get; set; } = 2;           // 连续断开次数
+        public int PacketTimeoutSec { get; set; } = 5;          // 看门狗超时
+        public int GattGraceSec { get; set; } = 5;              // GATT 关闭宽限期
+        public int LockCooldownSec { get; set; } = 5;           // 锁屏冷却
     }
 }
